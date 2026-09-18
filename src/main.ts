@@ -71,9 +71,26 @@ const loop = new GameLoop({
   },
 });
 
+/**
+ * Whether the one-time setup has run.
+ *
+ * The button does double duty — first start and restart — and those must not do
+ * the same thing. Re-running setup on a restart opens a second `AudioContext`,
+ * re-prompts for screen sharing, and appends a second canvas over the first.
+ */
+let started = false;
+
 startButton.addEventListener('click', () => {
-  void begin();
+  if (started) restart();
+  else void begin();
 });
+
+function restart(): void {
+  overlay.hidden = true;
+  voiceController.reset();
+  game.start();
+  loop.start();
+}
 
 async function begin(): Promise<void> {
   startButton.disabled = true;
@@ -101,9 +118,13 @@ async function begin(): Promise<void> {
     await renderer.init(stage);
     keyboard.attach(window);
 
-    overlay.hidden = true;
-    game.start();
-    loop.start();
+    started = true;
+    // Leave the button in its restart state. It is behind the hidden overlay
+    // now, but a disabled button with stale text is what the player would meet
+    // if anything surfaced the overlay before the first game over.
+    startButton.disabled = false;
+    startButton.textContent = 'Run again';
+    restart();
   } catch (error) {
     startButton.disabled = false;
     startButton.textContent = 'Try again';
@@ -118,13 +139,6 @@ function showGameOver(): void {
   startButton.disabled = false;
   startButton.textContent = 'Run again';
   status.textContent = `${String(score)} points over ${distance.toFixed(0)} metres.`;
-
-  startButton.onclick = (): void => {
-    overlay.hidden = true;
-    voiceController.reset();
-    game.start();
-    loop.start();
-  };
 }
 
 // The context is suspended when the app is backgrounded; resuming mid-run would

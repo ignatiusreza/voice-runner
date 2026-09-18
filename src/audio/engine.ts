@@ -2,7 +2,7 @@ import { BeatTracker } from './analysis/beat';
 import type { AudioFeatures } from './analysis/features';
 import { FeatureExtractor, SILENT_FEATURES } from './analysis/features';
 import type { VoiceFrame } from './analysis/voice';
-import { VoiceAnalyser } from './analysis/voice';
+import { SILENCE_DB, VoiceAnalyser } from './analysis/voice';
 import { openMicrophone } from './sources/microphone';
 import { attachBestStageSource } from './sources/registry';
 import type { AttachedAudioSource, AudioSourceProvider } from './sources/types';
@@ -11,6 +11,12 @@ import type { AttachedAudioSource, AudioSourceProvider } from './sources/types';
 const FFT_SIZE = 2048;
 /** Bass-heavy music flickers badly without smoothing; too much blurs onsets. */
 const SMOOTHING = 0.6;
+/**
+ * Gap between calibration samples. Background tabs clamp timers to about a
+ * second, which yields few samples but still terminates — the silence filter
+ * and the analyser's snap-out-of-silence behaviour cover the sparse case.
+ */
+const CALIBRATION_INTERVAL_MS = 16;
 
 export interface AudioEngineOptions {
   /** Overrides the stage source preference order. Used by demo and test modes. */
@@ -168,14 +174,24 @@ export class AudioEngine {
     const deadline = performance.now() + seconds * 1000;
     while (performance.now() < deadline) {
       this.voiceAnalyserNode.getFloatTimeDomainData(this.waveform);
-      samples.push(this.voice.analyse(this.waveform, this.time).db);
-      await nextFrame();
+      const { db } = this.voice.analyse(this.waveform, this.time);
+      // A just-opened stream hands back zeroed buffers for a moment. Those are
+      // not a quiet room, and including them drags the median to an impossible
+      // floor that the whole run is then judged against.
+      if (db > SILENCE_DB) samples.push(db);
+      await delay(CALIBRATION_INTERVAL_MS);
+    }
+
+    if (samples.length === 0) {
+      // Nothing audible was heard at all. Leave the analyser to snap to the
+      // first real frame rather than priming it with a fabricated level.
+      return this.voice.backgroundDb;
     }
 
     // Median, not mean: a cough or a door slam during calibration would drag a
     // mean upward and leave the gate too high for the whole run.
     samples.sort((a, b) => a - b);
-    const median = samples[Math.floor(samples.length / 2)] ?? -60;
+    const median = samples[Math.floor(samples.length / 2)]!;
     this.voice.primeFloor(median);
     return median;
   }
@@ -193,10 +209,16 @@ export class AudioEngine {
   }
 }
 
-function nextFrame(): Promise<void> {
+/**
+ * Waits on a timer rather than a frame.
+ *
+ * Calibration used to await `requestAnimationFrame`, which a hidden tab never
+ * fires — so starting the game and switching away hung setup indefinitely.
+ * Nothing about measuring the room depends on rendering, and the analyser node
+ * is fed by the audio graph either way.
+ */
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    requestAnimationFrame(() => {
-      resolve();
-    });
+    setTimeout(resolve, ms);
   });
 }

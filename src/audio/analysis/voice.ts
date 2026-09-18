@@ -37,6 +37,13 @@ const DEFAULTS = {
   maxPitchHz: 400,
 };
 
+/**
+ * Below this a frame is digital silence rather than a quiet room — real rooms
+ * bottom out around -70 dBFS, so anything under this is the stream not
+ * delivering audio yet, and must not be measured as a background level.
+ */
+export const SILENCE_DB = -90;
+
 /** Below this the frame is silence and pitch detection is not worth running. */
 const PITCH_GATE_DB = -55;
 /** YIN's accept threshold on the normalised difference function. */
@@ -68,7 +75,13 @@ export class VoiceAnalyser {
 
     const db = amplitudeToDb(rootMeanSquare(samples));
 
-    if (!this.initialised) {
+    // A floor sitting at digital silence is an absence of data, not a
+    // measurement of a room: a freshly opened `MediaStream` delivers zeroed
+    // buffers for a moment before real samples arrive. Crawling up from there
+    // at the rise half-life leaves every frame reading tens of dB "above
+    // background" for ~20 seconds, which latches the gate open — and because a
+    // jump needs a rising edge, that means no jumps at all. Snap instead.
+    if (!this.initialised || this.floorDb <= SILENCE_DB) {
       this.floorDb = db;
       this.initialised = true;
     } else {

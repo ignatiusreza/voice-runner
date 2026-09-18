@@ -110,6 +110,29 @@ describe('VoiceAnalyser', () => {
     expect(frame.floorDb).toBeGreaterThan(frame.db + 10);
   });
 
+  it('snaps out of digital silence instead of crawling', () => {
+    const analyser = new VoiceAnalyser({ sampleRate: SAMPLE_RATE });
+    // A freshly opened MediaStream hands back zeroed buffers for a moment.
+    for (let i = 0; i < 30; i++) analyser.analyse(new Float32Array(2048), i / 60);
+    expect(analyser.backgroundDb).toBeLessThan(-90);
+
+    // The first real audio must re-seat the floor, not be measured against the
+    // silence. Crawling up from -140dB leaves the gate latched open for ~20s,
+    // and because a jump needs a rising edge that means no jumps at all.
+    const first = analyser.analyse(noise(2048, 0.05, 7), 30 / 60);
+    expect(first.excessDb).toBeLessThan(3);
+  });
+
+  it('still treats a genuinely quiet room as a real background', () => {
+    const analyser = new VoiceAnalyser({ sampleRate: SAMPLE_RATE });
+    // Quiet but not digital silence: a real room floor, which must be tracked
+    // rather than discarded, or a whisper would read as a shout.
+    let frame = analyser.analyse(noise(2048, 0.0005), 0);
+    for (let i = 1; i < 120; i++) frame = analyser.analyse(noise(2048, 0.0005, i), i / 60);
+    expect(analyser.backgroundDb).toBeGreaterThan(-90);
+    expect(Math.abs(frame.excessDb)).toBeLessThan(3);
+  });
+
   it('resets back to a cold start', () => {
     const analyser = new VoiceAnalyser({ sampleRate: SAMPLE_RATE });
     analyser.primeFloor(-10);
