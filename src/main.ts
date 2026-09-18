@@ -1,4 +1,5 @@
 import './style.css';
+import type { AudioFeatures } from './audio/analysis/features';
 import type { VoiceFrame } from './audio/analysis/voice';
 import type { AudioEngineOptions } from './audio/engine';
 import { AudioEngine } from './audio/engine';
@@ -53,11 +54,13 @@ function readDemoMode(): AudioEngineOptions | null {
 // Sampling drives the beat tracker, so it must happen exactly once per frame —
 // the HUD reads this rather than sampling again.
 let lastVoiceFrame: VoiceFrame | null = null;
+let lastFeatures: AudioFeatures | null = null;
 
 const loop = new GameLoop({
   update(dt) {
     const { features, voice } = audio.sample();
     lastVoiceFrame = voice;
+    lastFeatures = features;
     game.setAudio(features, audio.beats.current);
     game.setActions(mergeActions([voiceController.update(voice), keyboard.poll()]));
     game.update(dt);
@@ -68,6 +71,7 @@ const loop = new GameLoop({
     const snapshot = game.snapshot;
     renderer.draw(snapshot);
     hud.update(snapshot, lastVoiceFrame);
+    if (import.meta.env.DEV) recordProbe();
   },
 });
 
@@ -79,6 +83,66 @@ const loop = new GameLoop({
  * re-prompts for screen sharing, and appends a second canvas over the first.
  */
 let started = false;
+
+/**
+ * Dev-only sampling of the live analysis, so the feature-to-stage mappings can
+ * be checked against real audio instead of guessed. Read from the console as
+ * `__voiceRunner.stats()`.
+ */
+interface ProbeStat {
+  min: number;
+  max: number;
+  sum: number;
+  n: number;
+}
+
+const probe = new Map<string, ProbeStat>();
+
+function recordProbe(): void {
+  const f = lastFeatures;
+  if (!f) return;
+  const beat = audio.beats.current;
+  const mood = game.snapshot.mood;
+  const samples: Record<string, number> = {
+    energy: f.energy,
+    bass: f.bass,
+    mid: f.mid,
+    treble: f.treble,
+    brightness: f.brightness,
+    flux: f.flux,
+    beatConfidence: beat.confidence,
+    bpm: beat.bpm,
+    moodIntensity: mood.intensity,
+    moodWeight: mood.weight,
+    moodBrightness: mood.brightness,
+    speed: game.snapshot.speed,
+  };
+  for (const [key, value] of Object.entries(samples)) {
+    const stat = probe.get(key) ?? { min: Infinity, max: -Infinity, sum: 0, n: 0 };
+    stat.min = Math.min(stat.min, value);
+    stat.max = Math.max(stat.max, value);
+    stat.sum += value;
+    stat.n += 1;
+    probe.set(key, stat);
+  }
+}
+
+if (import.meta.env.DEV) {
+  Object.defineProperty(window, '__voiceRunner', {
+    value: {
+      reset: (): void => {
+        probe.clear();
+      },
+      stats: () =>
+        Object.fromEntries(
+          [...probe.entries()].map(([k, v]) => [
+            k,
+            { min: +v.min.toFixed(4), mean: +(v.sum / v.n).toFixed(4), max: +v.max.toFixed(4) },
+          ]),
+        ),
+    },
+  });
+}
 
 startButton.addEventListener('click', () => {
   if (started) restart();

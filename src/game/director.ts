@@ -1,5 +1,6 @@
 import type { BeatEstimate } from '../audio/analysis/beat';
 import type { AudioFeatures } from '../audio/analysis/features';
+import { AdaptiveScale } from '../core/adaptive-scale';
 import { clamp, lerp, mapRange, smoothTowards } from '../core/math';
 import type { Rng } from '../core/rng';
 import {
@@ -66,6 +67,15 @@ export interface StageMood {
  * and it is the price of generating from a live stream instead of a file.
  */
 export class StageDirector {
+  /**
+   * Reference peaks measured from a real YouTube tab, not guessed: broadband
+   * energy topped out near 0.095, the 20-250Hz band near 0.57 and the spectral
+   * centroid near 0.23 over twenty seconds of music.
+   */
+  private readonly intensityScale = new AdaptiveScale(0.08);
+  private readonly weightScale = new AdaptiveScale(0.45);
+  private readonly brightnessScale = new AdaptiveScale(0.2);
+
   private smoothedIntensity = 0;
   private smoothedBrightness = 0.35;
   private smoothedWeight = 0;
@@ -116,14 +126,20 @@ export class StageDirector {
   ): void {
     // Loudness rises fast and falls slowly so a drop in the music does not
     // instantly flatten the stage; colour moves slower still, to avoid strobing.
+    // Scale first, then smooth. Smoothing the raw feature and scaling after
+    // would flatten the dynamics before they were ever measured.
+    const intensity = this.intensityScale.update(features.energy, dt);
+    const weight = this.weightScale.update(features.bass, dt);
+    const brightness = this.brightnessScale.update(features.brightness, dt);
+
     this.smoothedIntensity = smoothTowards(
       this.smoothedIntensity,
-      features.energy,
-      features.energy > this.smoothedIntensity ? 0.12 : 0.6,
+      intensity,
+      intensity > this.smoothedIntensity ? 0.12 : 0.6,
       dt,
     );
-    this.smoothedBrightness = smoothTowards(this.smoothedBrightness, features.brightness, 1.5, dt);
-    this.smoothedWeight = smoothTowards(this.smoothedWeight, features.bass, 0.35, dt);
+    this.smoothedBrightness = smoothTowards(this.smoothedBrightness, brightness, 0.9, dt);
+    this.smoothedWeight = smoothTowards(this.smoothedWeight, weight, 0.35, dt);
     this.currentBpm = beat.bpm;
     this.currentConfidence = beat.confidence;
 
@@ -187,7 +203,7 @@ export class StageDirector {
 
     // Heavier low end lifts the ground; the step is capped so terrain stays
     // runnable and does not turn into a staircase of unclearable walls.
-    const desired = mapRange(this.smoothedWeight, 0.04, 0.5, minGroundHeight, maxGroundHeight);
+    const desired = mapRange(this.smoothedWeight, 0, 1, minGroundHeight, maxGroundHeight);
     const jitter = this.rng.range(-0.35, 0.35) * this.smoothedIntensity;
     const height = clamp(
       clamp(desired + jitter, this.lastSegmentHeight - 1.2, this.lastSegmentHeight + 1.2),
@@ -272,7 +288,7 @@ export class StageDirector {
     // Hold the first bar clear so the player hears the tempo before reacting.
     if (beatIndex < 4) return null;
 
-    const density = mapRange(this.smoothedIntensity, 0.03, 0.4, 0.12, 0.72);
+    const density = mapRange(this.smoothedIntensity, 0, 1, 0.1, 0.78);
     if (!this.rng.chance(density)) return null;
 
     // Bright, airy music hangs things overhead; heavy music puts them on the
@@ -284,7 +300,7 @@ export class StageDirector {
     // The hole is cut inside the beat and sized to the jump arc, so it always
     // fits; it just needs enough beat left over for solid ground either side.
     const roomForGap = segmentWidth >= MIN_SEGMENT_WIDTH * 3;
-    if (roomForGap && this.smoothedIntensity > 0.25 && roll < 0.15) return 'gap';
+    if (roomForGap && this.smoothedIntensity > 0.45 && roll < 0.15) return 'gap';
 
     return roll < 0.5 + (0.5 - bright) * 0.6 ? 'block' : 'hanging';
   }
@@ -345,6 +361,9 @@ export class StageDirector {
     this.smoothedIntensity = 0;
     this.smoothedBrightness = 0.35;
     this.smoothedWeight = 0;
+    this.intensityScale.reset();
+    this.weightScale.reset();
+    this.brightnessScale.reset();
     this.runSpeed = TUNING.baseRunSpeed;
     this.nextBeatTime = null;
     this.nextSegmentX = null;

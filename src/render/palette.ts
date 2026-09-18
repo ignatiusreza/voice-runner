@@ -27,8 +27,11 @@ export interface Palette {
  */
 export function paletteFor(mood: StageMood): Palette {
   // 250deg (indigo) through 40deg (amber), the long way round the warm side.
-  const hue = lerp(250, 400, clamp(mood.brightness * 1.6, 0, 1)) % 360;
-  const energy = clamp(mood.intensity * 2.2, 0, 1);
+  // Mood arrives already scaled to 0..1 by the director, so it is used
+  // directly — the old multipliers were compensating for a feature that never
+  // got near its assumed range.
+  const hue = lerp(250, 400, clamp(mood.brightness, 0, 1)) % 360;
+  const energy = clamp(mood.intensity, 0, 1);
   const saturation = lerp(0.22, 0.72, energy);
 
   return {
