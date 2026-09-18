@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#05050c" />
+    <meta
+      name="description"
+      content="A voice-controlled endless runner whose stages are generated from the music playing around you."
+    />
+    <title>Voice Runner</title>
+  </head>
+  <body>
+    <div id="stage" aria-hidden="true"></div>
+    <div id="hud" class="hud"></div>
+
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <h1 class="panel__title">Voice Runner</h1>
+        <p class="panel__lede">
+          Play music anywhere — Spotify, YouTube, a podcast, the room — and the stage builds itself
+          from it. <strong>Shout to jump. Growl low to slide.</strong>
+        </p>
+        <button id="start" class="button" type="button">Allow microphone &amp; run</button>
+        <p class="panel__note" id="status">
+          The microphone is used for controls only. Nothing is recorded, stored or uploaded.
+        </p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
