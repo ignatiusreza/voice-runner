@@ -119,21 +119,26 @@ describe('StageDirector', () => {
     expect(average(heavy.segments)).toBeGreaterThan(average(light.segments));
   });
 
-  it('runs faster for faster music', () => {
-    const fast = run(5, LOUD, beatAt(170), 6).director.speed;
-    const slow = run(5, LOUD, beatAt(70), 6).director.speed;
-    expect(fast).toBeGreaterThan(slow);
+  it('holds the run speed constant, whatever the music does', () => {
+    // Placement predicts where the player will be when a beat sounds, using the
+    // speed at generation time. Any drift before they arrive is arrival-time
+    // error, and measured that alone capped beat lock at 0.46.
+    for (const bpm of [60, 120, 200]) {
+      for (const audio of [LOUD, QUIET]) {
+        expect(run(5, audio, beatAt(bpm), 8).director.speed).toBe(TUNING.baseRunSpeed);
+      }
+    }
   });
 
-  it('keeps the speed inside its bounds even at absurd tempos', () => {
-    expect(run(5, LOUD, beatAt(600), 6).director.speed).toBeLessThanOrEqual(TUNING.maxRunSpeed);
-    expect(run(5, LOUD, beatAt(5), 6).director.speed).toBeGreaterThanOrEqual(TUNING.minRunSpeed);
-  });
-
-  it('ignores the tempo when the estimate is not trusted', () => {
-    const confident = run(5, LOUD, beatAt(180, 1), 6).director.speed;
-    const unsure = run(5, LOUD, beatAt(180, 0), 6).director.speed;
-    expect(unsure).toBeLessThan(confident);
+  it('packs the stage more tightly for faster music', () => {
+    // Tempo drives the stage through beat *spacing* now, which is exact, rather
+    // than through scroll speed, which could only ever be approximate.
+    const beatWidth = (bpm: number): number => {
+      const { slice } = run(5, LOUD, beatAt(bpm), 8);
+      const solid = slice.segments.filter((s) => s.solid);
+      return solid.reduce((sum, s) => sum + s.width, 0) / solid.length;
+    };
+    expect(beatWidth(180)).toBeLessThan(beatWidth(90));
   });
 
   it('never cuts a gap wider than a jump can carry, at any tempo', () => {
@@ -192,6 +197,50 @@ describe('StageDirector', () => {
       if (here === undefined || before === undefined) continue;
       const rise = Math.max(0, here - before);
       expect(rise + block.height).toBeLessThanOrEqual(maxFairBlockHeight() + 1e-6);
+    }
+  });
+
+  it('never hangs an obstacle right after a downward step', () => {
+    // Running off a drop puts the player in the air, and ducking needs the
+    // ground — so a hanging obstacle there cannot be avoided at all.
+    const { slice } = run(11, () => features({ energy: 0.8, bass: 0.9 }), beatAt(180), 30);
+    const heights = new Map<number, number>();
+    for (const segment of slice.segments) {
+      if (segment.solid) heights.set(segment.beatIndex, segment.height);
+    }
+    const hanging = slice.obstacles.filter((o) => o.kind === 'hanging');
+    expect(hanging.length).toBeGreaterThan(0);
+    for (const obstacle of hanging) {
+      const here = heights.get(obstacle.beatIndex);
+      const before = heights.get(obstacle.beatIndex - 1);
+      if (here === undefined || before === undefined) continue;
+      expect(before - here).toBeLessThanOrEqual(0.25 + 1e-6);
+    }
+  });
+
+  it('locks the beat grid to the tracker phase, not to the camera', () => {
+    // The generator used to seed its cursor from camera geometry, so the stage
+    // had the right tempo at an arbitrary phase and never re-synced — the map
+    // kept time with itself instead of with the music.
+    const period = 0.5;
+    for (const anchor of [0, 0.13, 0.37, 0.49]) {
+      const director = new StageDirector(new Rng(5));
+      const slice: WorldSlice = { segments: [], obstacles: [] };
+      const now = 3;
+      director.update(slice, 0, now, LOUD(), { bpm: 120, period, anchor, confidence: 0.9 }, STEP);
+
+      // A segment starting at x is reached at now + (x - playerX)/speed, and
+      // that arrival time has to sit on the tracker's grid.
+      const speed = director.speed;
+      for (const segment of [...slice.segments].sort((a, b) => a.x - b.x).slice(0, 6)) {
+        const arrival = now + segment.x / speed;
+        const offGrid = Math.abs(arrival - anchor) % period;
+        const distanceToBeat = Math.min(offGrid, period - offGrid);
+        expect(
+          distanceToBeat,
+          `anchor ${String(anchor)}, segment at ${segment.x.toFixed(2)}`,
+        ).toBeLessThan(0.02);
+      }
     }
   });
 

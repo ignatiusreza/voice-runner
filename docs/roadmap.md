@@ -34,6 +34,8 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **Strip source maps from native builds.** `cap sync` copies `dist/` wholesale into the APK, so the 2.2MB of `.map` files Vite emits ship inside it — about half the 4.8MB debug APK, and they publish the original source. Fine for a debug build, not for a store release: either drop `build.sourcemap` for native builds or delete the maps between `vite build` and `cap copy`.
 
+**Beat detection on difficult material.** Generation now locks tightly to the beat _when the beat is known_ — 0.88 against a known tempo. On real music the tracker is the weak link: confidence averages around 0.40 and the tempo estimate still reports octave errors on sparse or rubato passages, which caps end-to-end sync near 0.71. Better onset detection (per-band flux with adaptive thresholds) and a proper tempo-hypothesis tracker are the next lever, not more generator tuning.
+
 ## Known deferred decisions
 
 **TypeScript 7.** Stable since before this scaffold, but `typescript-eslint` still declares `typescript <6.1.0`, so adopting it means losing type-aware linting. Pinned at 6.0.3 until typescript-eslint ships support; revisit then.

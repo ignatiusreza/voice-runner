@@ -1,7 +1,7 @@
 import type { BeatEstimate } from '../audio/analysis/beat';
 import type { AudioFeatures } from '../audio/analysis/features';
 import { AdaptiveScale } from '../core/adaptive-scale';
-import { clamp, lerp, mapRange, smoothTowards } from '../core/math';
+import { clamp, mapRange, smoothTowards } from '../core/math';
 import type { Rng } from '../core/rng';
 import {
   jumpDistance,
@@ -13,6 +13,21 @@ import {
 import { TUNING } from './tuning';
 import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 
+/** Below this the tracker's phase is too rough to steer generation by. */
+const PHASE_LOCK_MIN_CONFIDENCE = 0.2;
+/** Seconds of phase correction allowed per second, so the slew stays invisible. */
+const PHASE_SLEW_RATE = 0.2;
+
+/** The beat time on `beat`'s grid nearest to `time`. */
+function snapToBeatGrid(time: number, beat: BeatEstimate): number {
+  return beat.anchor + Math.round((time - beat.anchor) / beat.period) * beat.period;
+}
+
+/** The latest beat time on `beat`'s grid at or before `time`. */
+function floorToBeatGrid(time: number, beat: BeatEstimate): number {
+  return beat.anchor + Math.floor((time - beat.anchor) / beat.period) * beat.period;
+}
+
 /**
  * Clear ground required after a jump hazard, as a multiple of the jump's own
  * length: the player has to land and recover before the next demand.
@@ -21,6 +36,12 @@ const HAZARD_SPACING = 1.15;
 
 const MIN_OBSTACLE_WIDTH = 0.7;
 const MAX_OBSTACLE_WIDTH = 2.6;
+
+/**
+ * Largest downward terrain step that still leaves the player grounded enough to
+ * duck on the following beat.
+ */
+const MAX_DROP_BEFORE_DUCK = 0.25;
 
 /** Shortest block worth placing; below this it is scenery, not an obstacle. */
 const MIN_BLOCK_HEIGHT = 0.45;
@@ -143,27 +164,44 @@ export class StageDirector {
     this.currentBpm = beat.bpm;
     this.currentConfidence = beat.confidence;
 
-    // Tempo sets the pace, but only as far as the estimate is trusted — a wrong
-    // BPM at full authority would make the game unplayably fast or sluggish.
-    const tempoSpeed = TUNING.baseRunSpeed * (beat.bpm / 120);
-    const target = clamp(
-      lerp(TUNING.baseRunSpeed, tempoSpeed, beat.confidence) *
-        (0.9 + this.smoothedIntensity * 0.35),
-      TUNING.minRunSpeed,
-      TUNING.maxRunSpeed,
-    );
-    this.runSpeed = smoothTowards(this.runSpeed, target, 1.2, dt);
+    // The run speed is constant, deliberately.
+    //
+    // A segment is placed where the player is predicted to be when its beat
+    // sounds, using the speed at generation time — but the player arrives
+    // seconds later. Any drift in between turns into arrival-time error, and
+    // even a 3% wobble over a four-second lookahead is a third of a beat at
+    // 170 BPM. Measured, that alone held beat lock at 0.46.
+    //
+    // Tempo still drives the stage, as obstacle *spacing*: a beat occupies
+    // `speed * period` metres, so faster music packs the stage more tightly.
+    // That relationship is exact, where scroll speed could only ever be
+    // approximate. See docs/adr/0004.
+    this.runSpeed = TUNING.baseRunSpeed;
 
     if (this.nextBeatTime === null) {
       // Start the terrain behind the camera, not at the player's feet: the
       // player is drawn some way in from the left edge, and generating forward
       // from their position leaves the visible ground under and behind them
       // empty for the first second of a run.
-      const startX = playerX - TUNING.playerScreenX - START_MARGIN;
-      this.nextSegmentX = startX;
-      // Back-date the beat clock to match, so the grid still lines up with the
-      // music rather than being offset by however far back generation began.
-      this.nextBeatTime = now - (playerX - startX) / this.runSpeed;
+      const roughStartX = playerX - TUNING.playerScreenX - START_MARGIN;
+      // Snap onto the tracker's actual beat grid, and take the beat at or
+      // before the rough start so terrain still begins off-screen. Seeding from
+      // camera geometry alone gave the grid the right tempo at an arbitrary
+      // phase that never re-synced — the stage kept time with itself rather
+      // than with the music.
+      const roughTime = now - (playerX - roughStartX) / this.runSpeed;
+      this.nextBeatTime = floorToBeatGrid(roughTime, beat);
+      // Position has to come from the same grid, or the first segment starts
+      // off-beat and every width after it is measured from the wrong place.
+      this.nextSegmentX = playerX + this.runSpeed * (this.nextBeatTime - now);
+    } else if (beat.confidence > PHASE_LOCK_MIN_CONFIDENCE) {
+      // Ease the cursor back onto the grid as the estimate improves, rather
+      // than jumping: a sudden phase shift would stretch or squash one segment
+      // visibly. Slewing spreads it over a second or so.
+      const target = snapToBeatGrid(this.nextBeatTime, beat);
+      const error = target - this.nextBeatTime;
+      const maxShift = PHASE_SLEW_RATE * dt;
+      this.nextBeatTime += clamp(error, -maxShift, maxShift);
     }
 
     // After a stall (tab backgrounded, source swapped) the pointer can be far in
@@ -231,10 +269,16 @@ export class StageDirector {
     const rise = Math.max(0, height - previousHeight);
     const budget = maxFairBlockHeight() - rise;
 
+    // Running off a downward step puts the player in the air, and ducking needs
+    // the ground — so a hanging obstacle just after a drop is unduckable and
+    // therefore unavoidable. Blocks are fine there; jumping works mid-fall.
+    const drop = Math.max(0, previousHeight - height);
+    const duckable = drop <= MAX_DROP_BEFORE_DUCK;
+
+    const placeable =
+      kind === 'hanging' ? duckable : kind === 'block' ? budget >= MIN_BLOCK_HEIGHT : false;
     const placed =
-      kind !== null && (kind === 'hanging' || budget >= MIN_BLOCK_HEIGHT)
-        ? this.buildObstacle(kind, x, width, beatIndex, budget)
-        : null;
+      kind !== null && placeable ? this.buildObstacle(kind, x, width, beatIndex, budget) : null;
     if (placed) slice.obstacles.push(placed);
 
     if (placed === null) this.consecutiveObstacles = 0;

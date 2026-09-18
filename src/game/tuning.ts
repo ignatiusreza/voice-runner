@@ -36,7 +36,7 @@ export const TUNING = {
   /** Horizontal extent of the visible world. Drives how far ahead to generate. */
   viewWidth: 32,
   /** Generate this many metres past the right edge so nothing pops in. */
-  generationMargin: 24,
+  generationMargin: 14,
 
   /** Ground elevation range, in metres above the baseline. */
   minGroundHeight: 0,

@@ -106,9 +106,19 @@ export class BeatTracker {
 
     let bestLag = 0;
     let bestScore = 0;
+    let bestRawScore = 0;
     let zeroLagEnergy = 0;
     for (let i = 0; i < centred.length; i++) zeroLagEnergy += centred[i]! * centred[i]!;
     if (zeroLagEnergy <= 1e-9) return;
+
+    // Once a tempo is held with some confidence, staying there is preferred.
+    // Without this the estimate flip-flops between half, true and double time
+    // from window to window — measured swinging 75..200 BPM on one track — and
+    // a grid whose spacing changes every half second cannot feel in time.
+    const lockedLag =
+      this.estimate.confidence > INERTIA_MIN_CONFIDENCE
+        ? (60 / this.estimate.bpm) * ENVELOPE_HZ
+        : null;
 
     for (let lag = MIN_LAG; lag <= MAX_LAG; lag++) {
       let score = 0;
@@ -116,9 +126,12 @@ export class BeatTracker {
       // Biased estimator (divide by the full window, not the overlap). The
       // unbiased form inflates long lags, which is exactly how a tracker ends
       // up reporting half the real tempo.
-      const weighted = (score / centred.length) * tempoPrior(lag);
+      const raw = score / centred.length;
+      let weighted = raw * tempoPrior(lag);
+      if (lockedLag !== null) weighted *= inertiaPrior(lag, lockedLag);
       if (weighted > bestScore) {
         bestScore = weighted;
+        bestRawScore = raw;
         bestLag = lag;
       }
     }
@@ -126,7 +139,10 @@ export class BeatTracker {
     if (bestLag === 0) return;
 
     const period = bestLag / ENVELOPE_HZ;
-    const confidence = clamp((bestScore * centred.length) / zeroLagEnergy, 0, 1);
+    // Confidence measures how periodic the signal is, so it uses the unweighted
+    // correlation. Including the priors made a lag that only won *because* of
+    // them report low confidence, which then gated the phase lock off.
+    const confidence = clamp((bestRawScore * centred.length) / zeroLagEnergy, 0, 1);
 
     // Find where the beats sit inside the window: the offset whose comb of
     // samples one period apart collects the most onset energy.
@@ -143,10 +159,19 @@ export class BeatTracker {
 
     // `ordered` ends at the newest sample, i.e. at `now`.
     const windowStart = now - (ordered.length - 1) / ENVELOPE_HZ;
+    const anchor = windowStart + bestOffset / ENVELOPE_HZ;
+
+    // Ease onto a nearby tempo rather than snapping; a step change in period
+    // shifts every future beat at once. A distant tempo is a genuine change of
+    // material, so take that immediately.
+    const previous = this.estimate.period;
+    const nearby = Math.abs(Math.log2(period / previous)) < PERIOD_SMOOTHING_OCTAVES;
+    const settled = nearby ? previous + (period - previous) * PERIOD_SMOOTHING : period;
+
     this.estimate = {
-      bpm: 60 / period,
-      period,
-      anchor: windowStart + bestOffset / ENVELOPE_HZ,
+      bpm: 60 / settled,
+      period: settled,
+      anchor,
       confidence,
     };
   }
@@ -172,6 +197,23 @@ export class BeatTracker {
       confidence: 0,
     };
   }
+}
+
+/** Below this the held tempo is not trusted enough to bias the next estimate. */
+const INERTIA_MIN_CONFIDENCE = 0.25;
+/** Width of the stay-put preference around the held tempo, in octaves. */
+const INERTIA_OCTAVES = 0.25;
+/** Tempo changes within this much of the held one are eased into, not snapped. */
+const PERIOD_SMOOTHING_OCTAVES = 0.2;
+const PERIOD_SMOOTHING = 0.25;
+
+/**
+ * Keeps the estimate near the tempo already being tracked. Narrower than the
+ * global prior, so it resists octave flips without freezing out a real change.
+ */
+function inertiaPrior(lag: number, lockedLag: number): number {
+  const octaves = Math.log2(lag / lockedLag) / INERTIA_OCTAVES;
+  return Math.exp(-0.5 * octaves * octaves);
 }
 
 /** Centre of the tempo prior, in BPM, and its width in octaves. */

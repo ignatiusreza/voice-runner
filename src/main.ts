@@ -98,6 +98,33 @@ interface ProbeStat {
 
 const probe = new Map<string, ProbeStat>();
 
+/**
+ * Circular statistics for beat sync.
+ *
+ * Each time the player crosses a beat boundary in the world, the tracker's
+ * phase at that instant is recorded. Perfectly synced generation puts every
+ * crossing at the same phase, so the resultant length R approaches 1; an
+ * arbitrary phase offset scatters them uniformly and R approaches 0.
+ */
+let syncCos = 0;
+let syncSin = 0;
+let syncCount = 0;
+let lastCrossedBeat: number | null = null;
+
+function recordSync(): void {
+  const snapshot = game.snapshot;
+  const x = snapshot.player.x;
+  const segment = snapshot.world.segments.find((s) => x >= s.x && x < s.x + s.width);
+  if (!segment) return;
+  if (lastCrossedBeat === segment.beatIndex) return;
+  lastCrossedBeat = segment.beatIndex;
+
+  const phase = audio.beats.phaseAt(audio.time) * Math.PI * 2;
+  syncCos += Math.cos(phase);
+  syncSin += Math.sin(phase);
+  syncCount += 1;
+}
+
 function recordProbe(): void {
   const f = lastFeatures;
   if (!f) return;
@@ -117,6 +144,8 @@ function recordProbe(): void {
     moodBrightness: mood.brightness,
     speed: game.snapshot.speed,
   };
+  recordSync();
+
   for (const [key, value] of Object.entries(samples)) {
     const stat = probe.get(key) ?? { min: Infinity, max: -Infinity, sum: 0, n: 0 };
     stat.min = Math.min(stat.min, value);
@@ -132,7 +161,16 @@ if (import.meta.env.DEV) {
     value: {
       reset: (): void => {
         probe.clear();
+        syncCos = 0;
+        syncSin = 0;
+        syncCount = 0;
+        lastCrossedBeat = null;
       },
+      /** 1 = every beat boundary lands at the same phase, 0 = no relationship. */
+      sync: (): { crossings: number; lock: number } => ({
+        crossings: syncCount,
+        lock: syncCount === 0 ? 0 : +(Math.hypot(syncCos, syncSin) / syncCount).toFixed(3),
+      }),
       stats: () =>
         Object.fromEntries(
           [...probe.entries()].map(([k, v]) => [

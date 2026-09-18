@@ -9,8 +9,16 @@ import type { AttachedAudioSource, AudioSourceProvider } from './sources/types';
 
 /** 2048 bins at 48kHz is ~23Hz resolution and ~43ms latency. A good trade. */
 const FFT_SIZE = 2048;
-/** Bass-heavy music flickers badly without smoothing; too much blurs onsets. */
-const SMOOTHING = 0.6;
+/**
+ * No temporal smoothing on the stage analyser.
+ *
+ * It was 0.6, which carries 60% of each frame into the next and smears exactly
+ * the transients spectral flux exists to find — beat confidence sat near 0.15
+ * on real music because the onsets had been averaged away. The visual features
+ * are smoothed downstream by the director anyway, so this was costing the beat
+ * tracker its input to solve a problem already solved elsewhere.
+ */
+const SMOOTHING = 0;
 /**
  * Gap between calibration samples. Background tabs clamp timers to about a
  * second, which yields few samples but still terminates — the silence filter

@@ -38,4 +38,12 @@ Obstacles arrive under the player _on the beat_, which is what makes a run feel 
 
 When the tempo estimate is poor — speech, ambient noise, an arrhythmic podcast — confidence drops, the run speed stops following the estimate, and the grid degrades to a steady 120 BPM. The game becomes a plain runner rather than a broken one.
 
-Run speed is coupled to tempo, which means generation and simulation are coupled: tests that exercise the director must move the player at the speed the director itself chose, or they test a configuration that cannot occur.
+Run speed is held constant, and that is load-bearing rather than incidental. A segment is placed where the player is _predicted_ to be when its beat sounds, using the speed at generation time — but the player arrives seconds later, so any drift in between becomes arrival-time error. Measured, a 3% wobble over a four-second lookahead held beat lock at 0.46; pinning the speed took it to 0.88 on a known tempo. Tempo instead reaches the stage through beat _spacing_, since a beat occupies `speed * period` metres. That relationship is exact, where scroll speed could only ever be approximate.
+
+Three further things had to be true before any of this produced audible sync, each found by measuring rather than reasoning:
+
+- The generator must take its phase from the tracker's `anchor`. It originally seeded the cursor from camera geometry, which gave the stage the right tempo at an arbitrary phase that never re-synced.
+- The stage analyser must not smooth. `smoothingTimeConstant` was 0.6, which smeared the very transients spectral flux exists to detect and left beat confidence near 0.15 on real music.
+- Confidence must be measured from the unweighted correlation. Folding the tempo priors into it made a lag that won _because_ of them report low confidence, which then gated the phase lock off.
+
+Sync is measured, not assumed: `__voiceRunner.sync()` reports the circular concentration of beat-boundary crossings against the tracker's grid, 1 being perfect. Real music moved 0.14 -> 0.71, a known synthetic tempo 0.14 -> 0.88.

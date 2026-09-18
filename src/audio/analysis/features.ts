@@ -31,6 +31,12 @@ export const SILENT_FEATURES: AudioFeatures = {
   flux: 0,
 };
 
+/**
+ * Upper edge of the band spectral flux is measured over, in Hz. Kick, snare and
+ * most rhythmic attack live below this.
+ */
+const FLUX_CEILING_HZ = 2500;
+
 interface Band {
   readonly lowHz: number;
   readonly highHz: number;
@@ -67,6 +73,12 @@ export class FeatureExtractor {
   extract(magnitudes: Float32Array, time: number): AudioFeatures {
     const binHz = this.sampleRate / 2 / magnitudes.length;
 
+    // Onsets are measured only up to `FLUX_CEILING_HZ`. Beats are carried by
+    // percussive transients in the low and low-mid range, but four fifths of
+    // the bins sit above 4.7kHz, so a broadband flux is mostly hiss and cymbal
+    // wash diluting the signal the tempo tracker depends on.
+    const fluxBins = Math.min(magnitudes.length, Math.ceil(FLUX_CEILING_HZ / binHz));
+
     let sum = 0;
     let weightedSum = 0;
     let flux = 0;
@@ -76,7 +88,7 @@ export class FeatureExtractor {
       const magnitude = magnitudes[i]!;
       sum += magnitude;
       weightedSum += magnitude * i;
-      if (previous) {
+      if (previous && i < fluxBins) {
         // Half-wave rectified: only growth counts as an onset, decay does not.
         const delta = magnitude - previous[i]!;
         if (delta > 0) flux += delta;
@@ -96,7 +108,7 @@ export class FeatureExtractor {
       mid: clamp(bandAverage(magnitudes, binHz, BANDS.mid), 0, 1),
       treble: clamp(bandAverage(magnitudes, binHz, BANDS.treble), 0, 1),
       brightness: clamp(brightness, 0, 1),
-      flux: clamp(magnitudes.length > 0 ? flux / magnitudes.length : 0, 0, 1),
+      flux: clamp(fluxBins > 0 ? flux / fluxBins : 0, 0, 1),
     };
   }
 
