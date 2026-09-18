@@ -104,12 +104,29 @@ export class Renderer {
       this.screenHeight * 0.3,
     ).fill({ color: palette.skyLow, alpha: 0.55 });
 
-    // The sun pulses with loudness: the most direct visual tie to the music.
-    const radius = mapRange(snapshot.mood.intensity, 0, 0.4, 26, 64);
+    // The sun swells on every onset. This and the ground edge below are the
+    // only things on screen that move at the instant a sound happens — the
+    // terrain the player is looking at was generated seconds ago, so it cannot
+    // be in time with anything, and the smoothed features are by definition
+    // late. A drum hit has to be visible on the frame it lands or the world
+    // reads as merely audio-coloured rather than audio-driven.
+    const pulse = snapshot.mood.pulse;
+    const radius = mapRange(snapshot.mood.intensity, 0, 1, 26, 58) * (1 + pulse * 0.45);
     g.circle(this.screenWidth * 0.78, this.groundY - this.screenHeight * 0.42, radius).fill({
       color: palette.groundEdge,
-      alpha: 0.28,
+      alpha: 0.22 + pulse * 0.4,
     });
+
+    // A wash across the horizon, so the hit registers even when the sun is off
+    // screen on a narrow phone.
+    if (pulse > 0.05) {
+      g.rect(
+        0,
+        this.groundY - this.screenHeight * 0.3,
+        this.screenWidth,
+        this.screenHeight * 0.3,
+      ).fill({ color: palette.groundEdge, alpha: pulse * 0.12 });
+    }
   }
 
   private drawParallax(palette: Palette, cameraX: number, snapshot: GameSnapshot): void {
@@ -149,6 +166,7 @@ export class Renderer {
 
   private drawTerrain(palette: Palette, cameraX: number, snapshot: GameSnapshot): void {
     const g = this.terrain.clear();
+    const pulse = snapshot.mood.pulse;
     for (const segment of snapshot.world.segments) {
       if (!segment.solid) continue;
       const left = this.toScreenX(segment.x, cameraX);
@@ -158,8 +176,14 @@ export class Renderer {
       const top = this.toScreenY(segment.height);
       g.rect(left, top, width + 1, this.screenHeight - top).fill(palette.ground);
       // A bright cap on the walkable surface is the single strongest readability
-      // cue in a flat style — it tells the eye exactly where the feet land.
-      g.rect(left, top, width + 1, 3).fill(palette.groundEdge);
+      // cue in a flat style — it tells the eye exactly where the feet land. It
+      // also thickens and brightens on an onset, which puts the beat right
+      // where the player is already looking.
+      const capHeight = 3 + pulse * 5;
+      g.rect(left, top, width + 1, capHeight).fill({
+        color: palette.groundEdge,
+        alpha: 0.75 + pulse * 0.25,
+      });
     }
   }
 

@@ -18,7 +18,9 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **Persistent scores.** Local best per day-seed, then a shared board keyed on the seed so a given day's stage is comparable.
 
-**Audio-reactive effects.** Onsets are detected and currently only place obstacles. They could also drive screen shake, a flash on the ground edge, and particle bursts — cheap in a flat vector style and a large gain in how musical the game feels.
+**More onset-driven reaction.** Onsets now swell the sun, wash the horizon and thicken the ground edge on the frame they land — the only channel that can be exactly in time, since terrain is generated seconds ahead and the smoothed features are late by construction. Screen shake, particle bursts and an obstacle that flashes as it passes are the obvious next additions.
+
+**Obstacles are still placed by a weighted coin flip.** `rng.chance(density)` decides whether a beat carries one, so no specific obstacle corresponds to a specific sound. Tying the choice to onset strength is the natural fix, but it runs into the lookahead: a beat is generated 2.4-4s before the player reaches it, and a live stream cannot be read ahead, so the onset that would justify the obstacle has not happened yet. Options are a shorter lookahead (less warning, tighter correspondence) or holding a bank of obstacle "slots" that a later onset fills in as it scrolls.
 
 **Tuning against real music.** `TUNING` was set analytically, not by playing. The fairness guarantees hold, but whether a run _feels_ good across genres is unknown. The `file` source exists to make this measurable: same track, same seed, compare.
 

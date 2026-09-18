@@ -142,6 +142,7 @@ function recordProbe(): void {
     moodIntensity: mood.intensity,
     moodWeight: mood.weight,
     moodBrightness: mood.brightness,
+    pulse: mood.pulse,
     speed: game.snapshot.speed,
   };
   recordSync();

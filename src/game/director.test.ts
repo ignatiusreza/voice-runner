@@ -302,6 +302,27 @@ describe('StageDirector', () => {
     }
   });
 
+  it('pulses on an onset and falls away quickly', () => {
+    const director = new StageDirector(new Rng(77));
+    const slice: WorldSlice = { segments: [], obstacles: [] };
+    const quiet = features({ energy: 0.3, bass: 0.3, flux: 0 });
+    const hit = features({ energy: 0.3, bass: 0.3, flux: 0.3 });
+
+    director.update(slice, 0, 0, quiet, beatAt(120), STEP);
+    expect(director.mood.pulse).toBe(0);
+
+    // A hit has to show on the very frame it lands; a smoothed rise would put
+    // the flash late, which reads worse than no flash at all.
+    director.update(slice, 0, STEP, hit, beatAt(120), STEP);
+    expect(director.mood.pulse).toBeGreaterThan(0.8);
+
+    // And it has to be gone well inside a beat, or it is a wash not a hit.
+    for (let i = 0; i < 0.25 / STEP; i++) {
+      director.update(slice, 0, (i + 2) * STEP, quiet, beatAt(120), STEP);
+    }
+    expect(director.mood.pulse).toBeLessThan(0.2);
+  });
+
   it('follows the music into a brighter palette', () => {
     const dark = run(29, () => features({ energy: 0.3, brightness: 0.05 }), beatAt(120), 6);
     const bright = run(29, () => features({ energy: 0.3, brightness: 0.9 }), beatAt(120), 6);

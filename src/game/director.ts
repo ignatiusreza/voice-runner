@@ -13,6 +13,9 @@ import {
 import { TUNING } from './tuning';
 import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 
+/** How fast an onset flash fades. Short enough to read as a hit. */
+const PULSE_DECAY_HALF_LIFE = 0.09;
+
 /** Below this the tracker's phase is too rough to steer generation by. */
 const PHASE_LOCK_MIN_CONFIDENCE = 0.2;
 /** Seconds of phase correction allowed per second, so the slew stays invisible. */
@@ -72,6 +75,16 @@ export interface StageMood {
   bpm: number;
   /** 0..1. Low means the tempo grid is a guess and the stage should calm down. */
   confidence: number;
+  /**
+   * 0..1 onset strength, attacking instantly and decaying in ~a tenth of a
+   * second. This is the only channel that is exactly in time with the audio.
+   *
+   * Everything else the stage does is either smoothed over hundreds of
+   * milliseconds or generated seconds ahead of the player, so nothing ever
+   * responded to a sound at the moment it happened. A drum hit now moves the
+   * picture on the frame it lands.
+   */
+  pulse: number;
 }
 
 /**
@@ -96,10 +109,13 @@ export class StageDirector {
   private readonly intensityScale = new AdaptiveScale(0.08);
   private readonly weightScale = new AdaptiveScale(0.45);
   private readonly brightnessScale = new AdaptiveScale(0.2);
+  /** Flux measured on real music peaked near 0.29 with a mean around 0.04. */
+  private readonly onsetScale = new AdaptiveScale(0.12, 4);
 
   private smoothedIntensity = 0;
   private smoothedBrightness = 0.35;
   private smoothedWeight = 0;
+  private pulse = 0;
   private runSpeed: number = TUNING.baseRunSpeed;
 
   /** Audio time of the next beat to lay down. Never rewound by tempo changes. */
@@ -123,6 +139,7 @@ export class StageDirector {
       weight: this.smoothedWeight,
       bpm: this.currentBpm,
       confidence: this.currentConfidence,
+      pulse: this.pulse,
     };
   }
 
@@ -161,6 +178,12 @@ export class StageDirector {
     );
     this.smoothedBrightness = smoothTowards(this.smoothedBrightness, brightness, 0.9, dt);
     this.smoothedWeight = smoothTowards(this.smoothedWeight, weight, 0.35, dt);
+
+    // Attack instantly, fall away fast: a hit, not a wash. Smoothing the rise
+    // at all would put the flash late, which is worse than no flash.
+    const onset = this.onsetScale.update(features.flux, dt);
+    this.pulse =
+      onset > this.pulse ? onset : smoothTowards(this.pulse, 0, PULSE_DECAY_HALF_LIFE, dt);
     this.currentBpm = beat.bpm;
     this.currentConfidence = beat.confidence;
 
@@ -405,6 +428,8 @@ export class StageDirector {
     this.smoothedIntensity = 0;
     this.smoothedBrightness = 0.35;
     this.smoothedWeight = 0;
+    this.pulse = 0;
+    this.onsetScale.reset();
     this.intensityScale.reset();
     this.weightScale.reset();
     this.brightnessScale.reset();
