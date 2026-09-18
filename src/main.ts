@@ -70,7 +70,7 @@ const loop = new GameLoop({
     const { features, voice } = audio.sample();
     lastVoiceFrame = voice;
     lastFeatures = features;
-    game.setAudio(features, audio.beats.current);
+    game.setAudio(features, audio.beat);
     game.setActions(mergeActions([voiceController.update(voice), keyboard.poll()]));
     game.update(dt);
 
@@ -136,7 +136,7 @@ function recordFlash(): void {
   // Rising edge only, so one hit counts once however long it takes to fade.
   if (pulse > 0.6 && flashArmed) {
     flashArmed = false;
-    const phase = audio.beats.phaseAt(audio.time) * Math.PI * 2;
+    const phase = audio.phaseAt(audio.time) * Math.PI * 2;
     flashCos += Math.cos(phase);
     flashSin += Math.sin(phase);
     flashCount += 1;
@@ -153,7 +153,7 @@ function recordSync(): void {
   if (lastCrossedBeat === segment.beatIndex) return;
   lastCrossedBeat = segment.beatIndex;
 
-  const phase = audio.beats.phaseAt(audio.time) * Math.PI * 2;
+  const phase = audio.phaseAt(audio.time) * Math.PI * 2;
   syncCos += Math.cos(phase);
   syncSin += Math.sin(phase);
   syncCount += 1;
@@ -162,7 +162,7 @@ function recordSync(): void {
 function recordProbe(): void {
   const f = lastFeatures;
   if (!f) return;
-  const beat = audio.beats.current;
+  const beat = audio.beat;
   const mood = game.snapshot.mood;
   const samples: Record<string, number> = {
     energy: f.energy,
@@ -208,6 +208,19 @@ if (import.meta.env.DEV) {
         loudFrames = 0;
         totalFrames = 0;
       },
+      /**
+       * Reads the analysis straight from the audio thread, bypassing the render
+       * loop entirely — so it still reports real numbers in a hidden tab.
+       */
+      live: (): Record<string, number> => ({
+        energy: +audio.stage.energy.toFixed(4),
+        bass: +audio.stage.bass.toFixed(4),
+        brightness: +audio.stage.brightness.toFixed(4),
+        flux: +audio.stage.flux.toFixed(4),
+        time: +audio.stage.time.toFixed(2),
+        bpm: +audio.beat.bpm.toFixed(2),
+        confidence: +audio.beat.confidence.toFixed(3),
+      }),
       /** Do the onset flashes land on the beat, and how often do they fire? */
       flash: (): { hits: number; onBeat: number; visibleFraction: number } => ({
         hits: flashCount,

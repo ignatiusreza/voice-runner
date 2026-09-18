@@ -25,7 +25,9 @@
                                    GameSnapshot ──► Renderer + Hud
 ```
 
-One `GameLoop` drives it: a fixed 60Hz simulation step with a decoupled render, so the same shout produces the same jump on a 60Hz laptop and a 120Hz phone.
+One `GameLoop` drives the simulation: a fixed 60Hz step with a decoupled render, so the same shout produces the same jump on a 60Hz laptop and a 120Hz phone.
+
+The _stage_ analysis does not run on that loop. It lives in an `AudioWorkletProcessor` on the audio thread, stepping at a fixed block rate whatever the frame rate does — including when the tab is backgrounded and `requestAnimationFrame` stops entirely. Running it from `render()` meant the stage silently stopped reacting to music the moment the tab lost focus, and made every measurement depend on frame timing: one identical clip measured beat lock at 0.14 and 0.42 on consecutive runs. The main thread now only _reads_ the latest analysis. Voice input still samples per frame, which is correct — it only matters while the player is looking at the game.
 
 ## Layers
 

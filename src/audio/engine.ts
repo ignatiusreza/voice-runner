@@ -1,24 +1,24 @@
-import { BeatTracker } from './analysis/beat';
+import type { BeatEstimate } from './analysis/beat';
+import { FALLBACK_BPM } from './analysis/beat';
 import type { AudioFeatures } from './analysis/features';
-import { FeatureExtractor, SILENT_FEATURES } from './analysis/features';
+import { SILENT_FEATURES } from './analysis/features';
 import type { VoiceFrame } from './analysis/voice';
 import { SILENCE_DB, VoiceAnalyser } from './analysis/voice';
 import { openMicrophone } from './sources/microphone';
 import { attachBestStageSource } from './sources/registry';
 import type { AttachedAudioSource, AudioSourceProvider } from './sources/types';
+import type { AnalysisMessage } from './worklet/analysis-processor';
+import processorUrl from './worklet/analysis-processor?worker&url';
 
 /** 2048 bins at 48kHz is ~23Hz resolution and ~43ms latency. A good trade. */
 const FFT_SIZE = 2048;
-/**
- * No temporal smoothing on the stage analyser.
- *
- * It was 0.6, which carries 60% of each frame into the next and smears exactly
- * the transients spectral flux exists to find — beat confidence sat near 0.15
- * on real music because the onsets had been averaged away. The visual features
- * are smoothed downstream by the director anyway, so this was costing the beat
- * tracker its input to solve a problem already solved elsewhere.
- */
-const SMOOTHING = 0;
+
+const SILENT_BEAT: BeatEstimate = {
+  bpm: FALLBACK_BPM,
+  period: 60 / FALLBACK_BPM,
+  anchor: 0,
+  confidence: 0,
+};
 /**
  * Gap between calibration samples. Background tabs clamp timers to about a
  * second, which yields few samples but still terminates — the silence filter
@@ -59,17 +59,17 @@ export interface AudioEngineStatus {
 export class AudioEngine {
   private context: AudioContext | null = null;
   private stageAttachment: AttachedAudioSource | null = null;
-  private stageAnalyser: AnalyserNode | null = null;
+  private stageNode: AudioWorkletNode | null = null;
   private voiceAnalyserNode: AnalyserNode | null = null;
   private voiceStream: MediaStream | null = null;
 
-  private readonly spectrumBytes = new Uint8Array(FFT_SIZE / 2);
-  private readonly spectrum = new Float32Array(FFT_SIZE / 2);
   private readonly waveform = new Float32Array(FFT_SIZE);
 
-  private features: FeatureExtractor | null = null;
   private voice: VoiceAnalyser | null = null;
-  readonly beats = new BeatTracker();
+
+  /** Latest analysis posted from the audio thread. */
+  private stageFeatures: AudioFeatures = SILENT_FEATURES;
+  private stageBeat: BeatEstimate = SILENT_BEAT;
 
   private status: AudioEngineStatus = {
     stageSourceLabel: 'not started',
@@ -78,7 +78,6 @@ export class AudioEngine {
     notices: [],
   };
 
-  private lastFeatures: AudioFeatures = SILENT_FEATURES;
   private lastVoice: VoiceFrame | null = null;
 
   get currentStatus(): AudioEngineStatus {
@@ -141,11 +140,23 @@ export class AudioEngine {
 
     if (attached) {
       this.stageAttachment = attached;
-      this.stageAnalyser = context.createAnalyser();
-      this.stageAnalyser.fftSize = FFT_SIZE;
-      this.stageAnalyser.smoothingTimeConstant = SMOOTHING;
-      attached.node.connect(this.stageAnalyser);
-      this.features = new FeatureExtractor(context.sampleRate);
+      try {
+        await context.audioWorklet.addModule(processorUrl);
+        this.stageNode = new AudioWorkletNode(context, 'stage-analysis', {
+          numberOfInputs: 1,
+          numberOfOutputs: 0,
+        });
+        this.stageNode.port.onmessage = (event: MessageEvent<AnalysisMessage>): void => {
+          const { features, bpm, period, anchor, confidence } = event.data;
+          this.stageFeatures = features;
+          this.stageBeat = { bpm, period, anchor, confidence };
+        };
+        attached.node.connect(this.stageNode);
+      } catch (error) {
+        notices.push(
+          `Stage analysis unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     this.status = {
@@ -157,27 +168,42 @@ export class AudioEngine {
     return this.status;
   }
 
-  /** Samples both chains. Call once per rendered frame. */
+  /**
+   * Latest stage analysis, readable at any time.
+   *
+   * It advances on the audio thread, so this is meaningful whether or not the
+   * render loop is running — which is what makes it measurable.
+   */
+  get stage(): AudioFeatures {
+    return this.stageFeatures;
+  }
+
+  /** The beat grid, as last computed on the audio thread. */
+  get beat(): BeatEstimate {
+    return this.stageBeat;
+  }
+
+  /** 0 at a beat, approaching 1 just before the next. */
+  phaseAt(time: number): number {
+    const { anchor, period } = this.stageBeat;
+    const raw = ((time - anchor) / period) % 1;
+    return raw < 0 ? raw + 1 : raw;
+  }
+
+  /**
+   * Reads the latest analysis and samples the voice chain.
+   *
+   * The stage half is only *read* here — it is computed on the audio thread, so
+   * it keeps advancing at a fixed rate even when this is called irregularly or
+   * not at all.
+   */
   sample(): { features: AudioFeatures; voice: VoiceFrame | null } {
-    const time = this.time;
-
-    if (this.stageAnalyser && this.features) {
-      this.stageAnalyser.getByteFrequencyData(this.spectrumBytes);
-      for (let i = 0; i < this.spectrumBytes.length; i++) {
-        this.spectrum[i] = this.spectrumBytes[i]! / 255;
-      }
-      this.lastFeatures = this.features.extract(this.spectrum, time);
-      this.beats.push(this.lastFeatures);
-    } else {
-      this.lastFeatures = { ...SILENT_FEATURES, time };
-    }
-
     if (this.voiceAnalyserNode && this.voice) {
       this.voiceAnalyserNode.getFloatTimeDomainData(this.waveform);
-      this.lastVoice = this.voice.analyse(this.waveform, time);
+      this.lastVoice = this.voice.analyse(this.waveform, this.time);
     }
 
-    return { features: this.lastFeatures, voice: this.lastVoice };
+    return { features: this.stageFeatures, voice: this.lastVoice };
   }
 
   /**
@@ -217,11 +243,13 @@ export class AudioEngine {
   async stop(): Promise<void> {
     this.stageAttachment?.detach();
     this.stageAttachment = null;
+    this.stageNode?.disconnect();
+    this.stageNode = null;
     for (const track of this.voiceStream?.getTracks() ?? []) track.stop();
     this.voiceStream = null;
-    this.features?.reset();
     this.voice?.reset();
-    this.beats.reset();
+    this.stageFeatures = SILENT_FEATURES;
+    this.stageBeat = SILENT_BEAT;
     await this.context?.close();
     this.context = null;
   }
