@@ -33,8 +33,16 @@ export interface BeatEstimate {
  * stable enough to place obstacles on, and it degrades to a fixed 120 BPM grid
  * when the input is speech or noise rather than music.
  */
+interface TempoHypothesis {
+  /** Period in envelope samples; fractional, refined against the peak shape. */
+  lag: number;
+  /** Accumulated support, decayed each window. */
+  score: number;
+}
+
 export class BeatTracker {
   private readonly envelope = new Float32Array(ENVELOPE_SIZE);
+  private hypotheses: TempoHypothesis[] = [];
   /** Index just past the newest sample; the buffer is a ring. */
   private writeIndex = 0;
   private startTime: number | null = null;
@@ -104,53 +112,42 @@ export class BeatTracker {
     const centred = new Float32Array(ordered.length);
     for (let i = 0; i < ordered.length; i++) centred[i] = ordered[i]! - mean;
 
-    let bestLag = 0;
-    let bestScore = 0;
-    let bestRawScore = 0;
     let zeroLagEnergy = 0;
     for (let i = 0; i < centred.length; i++) zeroLagEnergy += centred[i]! * centred[i]!;
     if (zeroLagEnergy <= 1e-9) return;
 
-    // Once a tempo is held with some confidence, staying there is preferred.
-    // Without this the estimate flip-flops between half, true and double time
-    // from window to window — measured swinging 75..200 BPM on one track — and
-    // a grid whose spacing changes every half second cannot feel in time.
-    const lockedLag =
-      this.estimate.confidence > INERTIA_MIN_CONFIDENCE
-        ? (60 / this.estimate.bpm) * ENVELOPE_HZ
-        : null;
-
+    const strength = new Float32Array(MAX_LAG + 1);
+    const weighted = new Float32Array(MAX_LAG + 1);
     for (let lag = MIN_LAG; lag <= MAX_LAG; lag++) {
       let score = 0;
       for (let i = lag; i < centred.length; i++) score += centred[i]! * centred[i - lag]!;
-      // Biased estimator (divide by the full window, not the overlap). The
-      // unbiased form inflates long lags, which is exactly how a tracker ends
-      // up reporting half the real tempo.
-      const raw = score / centred.length;
-      let weighted = raw * tempoPrior(lag);
-      if (lockedLag !== null) weighted *= inertiaPrior(lag, lockedLag);
-      if (weighted > bestScore) {
-        bestScore = weighted;
-        bestRawScore = raw;
-        bestLag = lag;
-      }
+      // Normalised against the window's own energy, so the number means the
+      // same thing from window to window and can be accumulated over time.
+      strength[lag] = Math.max(0, score / zeroLagEnergy);
+      weighted[lag] = strength[lag]! * tempoPrior(lag);
     }
 
-    if (bestLag === 0) return;
+    this.updateHypotheses(weighted);
+    const winner = this.hypotheses[0];
+    if (!winner) return;
 
-    const period = bestLag / ENVELOPE_HZ;
-    // Confidence measures how periodic the signal is, so it uses the unweighted
-    // correlation. Including the priors made a lag that only won *because* of
-    // them report low confidence, which then gated the phase lock off.
-    const confidence = clamp((bestRawScore * centred.length) / zeroLagEnergy, 0, 1);
+    const lag = Math.round(winner.lag);
+    const period = winner.lag / ENVELOPE_HZ;
+
+    // Confidence measures one thing: how periodic the signal is at the winning
+    // tempo. Folding in the margin over the runner-up conflated "is there a
+    // beat" with "is it contested", and halved the number on exactly the
+    // material where the phase lock is most needed — which then gated the lock
+    // off. Stability is what the hypotheses provide; it is not this number.
+    const confidence = clamp(strength[lag] ?? 0, 0, 1);
 
     // Find where the beats sit inside the window: the offset whose comb of
     // samples one period apart collects the most onset energy.
     let bestOffset = 0;
     let bestOffsetScore = -Infinity;
-    for (let offset = 0; offset < bestLag; offset++) {
+    for (let offset = 0; offset < lag; offset++) {
       let score = 0;
-      for (let i = offset; i < ordered.length; i += bestLag) score += ordered[i]!;
+      for (let i = offset; i < ordered.length; i += lag) score += ordered[i]!;
       if (score > bestOffsetScore) {
         bestOffsetScore = score;
         bestOffset = offset;
@@ -159,21 +156,53 @@ export class BeatTracker {
 
     // `ordered` ends at the newest sample, i.e. at `now`.
     const windowStart = now - (ordered.length - 1) / ENVELOPE_HZ;
-    const anchor = windowStart + bestOffset / ENVELOPE_HZ;
-
-    // Ease onto a nearby tempo rather than snapping; a step change in period
-    // shifts every future beat at once. A distant tempo is a genuine change of
-    // material, so take that immediately.
-    const previous = this.estimate.period;
-    const nearby = Math.abs(Math.log2(period / previous)) < PERIOD_SMOOTHING_OCTAVES;
-    const settled = nearby ? previous + (period - previous) * PERIOD_SMOOTHING : period;
-
     this.estimate = {
-      bpm: 60 / settled,
-      period: settled,
-      anchor,
+      bpm: 60 / period,
+      period,
+      anchor: windowStart + bestOffset / ENVELOPE_HZ,
       confidence,
     };
+  }
+
+  /**
+   * Carries tempo candidates forward instead of picking a winner per window.
+   *
+   * Autocorrelation routinely scores two tempos almost equally — a tempo and
+   * its double, or two plausible readings of a syncopated pattern. Choosing the
+   * larger each time let noise flip the answer between windows: measured, the
+   * reported tempo swung 75..200 BPM on one track, and even on a fixed
+   * recording the mean moved 133 to 122 between runs. Hypotheses accumulate
+   * support instead, so a reading that has been right for several seconds is
+   * not displaced by one lucky window, and a genuine tempo change still wins
+   * once it has been supported for long enough.
+   */
+  private updateHypotheses(weighted: Float32Array): void {
+    for (const hypothesis of this.hypotheses) hypothesis.score *= HYPOTHESIS_DECAY;
+
+    for (let lag = MIN_LAG + 1; lag < MAX_LAG; lag++) {
+      const here = weighted[lag]!;
+      // Local maxima only: the peaks are the tempo candidates, and every lag
+      // near a peak would otherwise register as its own hypothesis.
+      if (here <= weighted[lag - 1]! || here < weighted[lag + 1]! || here < CANDIDATE_FLOOR) {
+        continue;
+      }
+
+      const refined = refinePeak(weighted, lag);
+      const match = this.hypotheses.find(
+        (h) => Math.abs(Math.log2(refined / h.lag)) < MATCH_TOLERANCE_OCTAVES,
+      );
+      if (match) {
+        match.lag += (refined - match.lag) * LAG_TRACKING;
+        match.score += here;
+      } else {
+        this.hypotheses.push({ lag: refined, score: here });
+      }
+    }
+
+    this.hypotheses.sort((a, b) => b.score - a.score);
+    if (this.hypotheses.length > MAX_HYPOTHESES) {
+      this.hypotheses.length = MAX_HYPOTHESES;
+    }
   }
 
   /** Copies the ring buffer out oldest-first. */
@@ -186,6 +215,7 @@ export class BeatTracker {
   }
 
   reset(): void {
+    this.hypotheses = [];
     this.envelope.fill(0);
     this.writeIndex = 0;
     this.startTime = null;
@@ -199,21 +229,25 @@ export class BeatTracker {
   }
 }
 
-/** Below this the held tempo is not trusted enough to bias the next estimate. */
-const INERTIA_MIN_CONFIDENCE = 0.25;
-/** Width of the stay-put preference around the held tempo, in octaves. */
-const INERTIA_OCTAVES = 0.25;
-/** Tempo changes within this much of the held one are eased into, not snapped. */
-const PERIOD_SMOOTHING_OCTAVES = 0.2;
-const PERIOD_SMOOTHING = 0.25;
+/** How much of its support a hypothesis keeps each window. */
+const HYPOTHESIS_DECAY = 0.7;
+/** Peaks weaker than this are noise, not tempo candidates. */
+const CANDIDATE_FLOOR = 0.02;
+/** Candidates within this of a hypothesis update it rather than spawning one. */
+const MATCH_TOLERANCE_OCTAVES = 0.08;
+/** How fast a hypothesis follows its candidate peak. */
+const LAG_TRACKING = 0.3;
+/** More than this and rivals are being tracked that will never be reported. */
+const MAX_HYPOTHESES = 6;
 
-/**
- * Keeps the estimate near the tempo already being tracked. Narrower than the
- * global prior, so it resists octave flips without freezing out a real change.
- */
-function inertiaPrior(lag: number, lockedLag: number): number {
-  const octaves = Math.log2(lag / lockedLag) / INERTIA_OCTAVES;
-  return Math.exp(-0.5 * octaves * octaves);
+/** Sub-sample peak position, so tempo is not quantised to integer lags. */
+function refinePeak(values: Float32Array, index: number): number {
+  const previous = values[index - 1] ?? 0;
+  const current = values[index] ?? 0;
+  const next = values[index + 1] ?? 0;
+  const denominator = 2 * (2 * current - next - previous);
+  if (denominator === 0) return index;
+  return index + (next - previous) / denominator;
 }
 
 /** Centre of the tempo prior, in BPM, and its width in octaves. */

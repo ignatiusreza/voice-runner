@@ -16,8 +16,14 @@ import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 /** How fast an onset flash fades. Short enough to read as a hit. */
 const PULSE_DECAY_HALF_LIFE = 0.09;
 
-/** Below this the tracker's phase is too rough to steer generation by. */
-const PHASE_LOCK_MIN_CONFIDENCE = 0.2;
+/**
+ * Below this the tracker's phase is too rough to steer generation by.
+ *
+ * Deliberately low. Locking to the best phase available beats free-running at
+ * an arbitrary one even when the estimate is mediocre, and the correction is
+ * rate-limited anyway, so a wrong guess costs a slow slew rather than a jump.
+ */
+const PHASE_LOCK_MIN_CONFIDENCE = 0.05;
 /** Seconds of phase correction allowed per second, so the slew stays invisible. */
 const PHASE_SLEW_RATE = 0.2;
 

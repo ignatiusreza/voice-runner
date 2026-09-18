@@ -79,6 +79,72 @@ describe('BeatTracker', () => {
     expect(tracker.current.confidence).toBe(0);
   });
 
+  it('holds one tempo through an ambiguous pattern', () => {
+    // Every other onset is weaker, so the half-tempo reading scores almost as
+    // well as the true one. Picking the stronger peak per window let noise flip
+    // between them; a carried-forward hypothesis should not wobble.
+    const tracker = new BeatTracker();
+    const period = 0.5;
+    const frameRate = 120;
+    const reported: number[] = [];
+    for (let i = 0; i < 20 * frameRate; i++) {
+      const time = i / frameRate;
+      const beatIndex = Math.floor(time / period);
+      const phase = (time % period) / period;
+      const accent = beatIndex % 2 === 0 ? 1 : 0.82;
+      const flux = phase < 0.15 ? accent * (1 - phase / 0.15) : 0;
+      tracker.push({ ...SILENT_FEATURES, time, flux });
+      if (time > 8) reported.push(tracker.current.bpm);
+    }
+
+    const min = Math.min(...reported);
+    const max = Math.max(...reported);
+    expect(max - min).toBeLessThan(6);
+  });
+
+  it('still follows a genuine tempo change', () => {
+    // Inertia must not become paralysis: sustained evidence for a new tempo
+    // has to win eventually.
+    const tracker = new BeatTracker();
+    const frameRate = 120;
+    let time = 0;
+    const feed = (bpm: number, seconds: number): void => {
+      const period = 60 / bpm;
+      for (let i = 0; i < seconds * frameRate; i++) {
+        const phase = (time % period) / period;
+        tracker.push({
+          ...SILENT_FEATURES,
+          time,
+          flux: phase < 0.15 ? 1 - phase / 0.15 : 0,
+        });
+        time += 1 / frameRate;
+      }
+    };
+
+    feed(100, 12);
+    expect(tracker.current.bpm).toBeGreaterThan(95);
+    expect(tracker.current.bpm).toBeLessThan(105);
+
+    feed(150, 20);
+    expect(tracker.current.bpm).toBeGreaterThan(143);
+    expect(tracker.current.bpm).toBeLessThan(157);
+  });
+
+  it('reports low confidence while two tempos are still contested', () => {
+    const tracker = new BeatTracker();
+    feedClickTrack(tracker, 120, 8);
+    const clear = tracker.current.confidence;
+
+    // Noise supports no tempo in particular, so nothing should pull clear.
+    const noisy = new BeatTracker();
+    let state = 7;
+    for (let i = 0; i < 8 * 120; i++) {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      noisy.push({ ...SILENT_FEATURES, time: i / 120, flux: state / 0x7fffffff });
+    }
+    expect(noisy.current.confidence).toBeLessThan(clear);
+  });
+
   it('returns to the fallback tempo after a reset', () => {
     const tracker = new BeatTracker();
     feedClickTrack(tracker, 120, 8);
