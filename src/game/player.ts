@@ -1,5 +1,5 @@
-import { clamp, lerp } from '../core/math';
 import type { ActionState } from '../input/actions';
+import { jumpVelocityFor } from './jump';
 import { TUNING } from './tuning';
 import type { TerrainSegment } from './world';
 import { groundHeightAt } from './world';
@@ -59,8 +59,7 @@ export function updatePlayer(
 
   const canJump = player.onGround || timers.coyoteFor > 0;
   if (timers.bufferedJumpFor > 0 && canJump) {
-    const strength = lerp(TUNING.minJumpFraction, 1, clamp(actions.jumpStrength, 0, 1));
-    player.verticalVelocity = TUNING.jumpVelocity * strength;
+    player.verticalVelocity = jumpVelocityFor(actions.jumpStrength);
     player.onGround = false;
     timers.bufferedJumpFor = 0;
     timers.coyoteFor = 0;
@@ -81,10 +80,13 @@ export function updatePlayer(
     timers.sustainFor = 0;
   }
 
+  // The multiplier applies to the *fall*, which is what makes a landing feel
+  // snappy. It used to apply to the climb too whenever the player was not
+  // sustaining, so a tapped jump rose against 1.6x gravity and reached barely
+  // 60% of its advertised height — tall blocks became unclearable without a
+  // held, full-volume shout. Height now varies by take-off speed alone.
   const gravity =
-    player.verticalVelocity > 0 && actions.sustaining
-      ? TUNING.gravity
-      : TUNING.gravity * TUNING.fallGravityMultiplier;
+    player.verticalVelocity > 0 ? TUNING.gravity : TUNING.gravity * TUNING.fallGravityMultiplier;
 
   if (!player.onGround) {
     player.verticalVelocity += gravity * dt;

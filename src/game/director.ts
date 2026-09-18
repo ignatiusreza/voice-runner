@@ -2,25 +2,30 @@ import type { BeatEstimate } from '../audio/analysis/beat';
 import type { AudioFeatures } from '../audio/analysis/features';
 import { clamp, lerp, mapRange, smoothTowards } from '../core/math';
 import type { Rng } from '../core/rng';
+import {
+  jumpDistance,
+  maxFairBlockHeight,
+  maxFairBlockWidth,
+  maxFairGapWidth,
+  REFERENCE_JUMP_STRENGTH,
+} from './jump';
 import { TUNING } from './tuning';
 import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 
-/** Ballistic peak of a full-strength jump, in metres. */
-export function maxJumpHeight(): number {
-  return (TUNING.jumpVelocity * TUNING.jumpVelocity) / (2 * Math.abs(TUNING.gravity));
-}
-
-/** Horizontal reach of a full-strength jump at `speed`, in metres. */
-export function maxJumpDistance(speed: number): number {
-  const airtime = (2 * TUNING.jumpVelocity) / Math.abs(TUNING.gravity);
-  return airtime * speed;
-}
-
 /**
- * A gap may use at most this much of the available jump reach. The margin
- * covers the player mistiming the take-off by a few frames.
+ * Clear ground required after a jump hazard, as a multiple of the jump's own
+ * length: the player has to land and recover before the next demand.
  */
-const GAP_SAFETY_FACTOR = 0.6;
+const HAZARD_SPACING = 1.15;
+
+const MIN_OBSTACLE_WIDTH = 0.7;
+const MAX_OBSTACLE_WIDTH = 2.6;
+
+/** Shortest block worth placing; below this it is scenery, not an obstacle. */
+const MIN_BLOCK_HEIGHT = 0.45;
+
+/** A hole may swallow at most this much of its beat, leaving ground to land on. */
+const MAX_GAP_SHARE_OF_BEAT = 0.5;
 
 /** Floor on segment width, so a tempo glitch cannot emit a zero-width segment. */
 const MIN_SEGMENT_WIDTH = 0.5;
@@ -74,6 +79,8 @@ export class StageDirector {
   private nextObstacleId = 1;
   /** Consecutive beats that already carry an obstacle; caps difficulty spikes. */
   private consecutiveObstacles = 0;
+  /** Right edge of the last hazard the player had to jump, in world metres. */
+  private lastJumpHazardEndX = -Infinity;
   private lastSegmentHeight = 0;
 
   constructor(private readonly rng: Rng) {}
@@ -176,6 +183,7 @@ export class StageDirector {
 
   private emitBeat(slice: WorldSlice, x: number, width: number, beatIndex: number): void {
     const { minGroundHeight, maxGroundHeight } = TUNING;
+    const previousHeight = this.lastSegmentHeight;
 
     // Heavier low end lifts the ground; the step is capped so terrain stays
     // runnable and does not turn into a staircase of unclearable walls.
@@ -187,28 +195,80 @@ export class StageDirector {
       maxGroundHeight,
     );
 
-    const kind = this.chooseObstacle(beatIndex, width);
-    const solid = kind !== 'gap';
+    const kind = this.chooseObstacle(beatIndex, x, width);
 
-    slice.segments.push({ beatIndex, x, width, height, solid });
-    this.lastSegmentHeight = solid ? height : this.lastSegmentHeight;
-
-    if (kind === null) {
-      this.consecutiveObstacles = 0;
+    if (kind === 'gap') {
+      this.emitGapBeat(slice, x, width, height, beatIndex);
+      this.consecutiveObstacles += 1;
+      this.lastJumpHazardEndX = x + width;
       return;
     }
 
-    this.consecutiveObstacles += 1;
-    if (kind !== 'gap') {
-      slice.obstacles.push(this.buildObstacle(kind, x, width, beatIndex));
-    }
+    slice.segments.push({ beatIndex, x, width, height, solid: true });
+    this.lastSegmentHeight = height;
+
+    // Terrain that steps up eats into the jump. A block on a beat 1.2m above
+    // the last one has to be cleared from the *lower* ground the player takes
+    // off from, so the rise counts against the block's own budget — otherwise
+    // the player hits its face while still climbing, which reads exactly like
+    // "jumping is not far enough".
+    const rise = Math.max(0, height - previousHeight);
+    const budget = maxFairBlockHeight() - rise;
+
+    const placed =
+      kind !== null && (kind === 'hanging' || budget >= MIN_BLOCK_HEIGHT)
+        ? this.buildObstacle(kind, x, width, beatIndex, budget)
+        : null;
+    if (placed) slice.obstacles.push(placed);
+
+    if (placed === null) this.consecutiveObstacles = 0;
+    else this.consecutiveObstacles += 1;
+    if (placed?.kind === 'block') this.lastJumpHazardEndX = placed.x + placed.width;
+  }
+
+  /**
+   * Lays a beat down as solid / hole / solid.
+   *
+   * A hole used to swallow the whole beat, which at anything under ~200 BPM is
+   * wider than a jump can carry — so gaps had to be suppressed at most tempi to
+   * stay fair. Cutting the hole *inside* the beat keeps it jumpable at every
+   * tempo and keeps the beat grid intact.
+   */
+  private emitGapBeat(
+    slice: WorldSlice,
+    x: number,
+    width: number,
+    height: number,
+    beatIndex: number,
+  ): void {
+    const gapWidth = Math.min(width * MAX_GAP_SHARE_OF_BEAT, maxFairGapWidth());
+    const lead = (width - gapWidth) / 2;
+
+    slice.segments.push({ beatIndex, x, width: lead, height, solid: true });
+    slice.segments.push({ beatIndex, x: x + lead, width: gapWidth, height, solid: false });
+    slice.segments.push({
+      beatIndex,
+      x: x + lead + gapWidth,
+      width: width - lead - gapWidth,
+      height,
+      solid: true,
+    });
+    this.lastSegmentHeight = height;
   }
 
   /** Returns the obstacle kind for this beat, or null for a clear beat. */
-  private chooseObstacle(beatIndex: number, segmentWidth: number): ObstacleKind | null {
+  private chooseObstacle(beatIndex: number, x: number, segmentWidth: number): ObstacleKind | null {
     // Guaranteed breather: never more than two loaded beats in a row, whatever
     // the music is doing. Without this, a dense passage becomes unsurvivable.
     if (this.consecutiveObstacles >= 2) return null;
+
+    // Nothing may be demanded of the player while they are still in the air
+    // from the last thing that had to be jumped. Beats are the wrong unit for
+    // this — at fast tempo a beat is shorter than a jump lasts, and a ducking
+    // hazard landing mid-jump is unavoidable because ducking needs the ground.
+    // The constraint is a distance, so it is enforced as one.
+    const clearRunNeeded = jumpDistance(REFERENCE_JUMP_STRENGTH, this.runSpeed) * HAZARD_SPACING;
+    if (x < this.lastJumpHazardEndX + clearRunNeeded) return null;
     // Hold the first bar clear so the player hears the tempo before reacting.
     if (beatIndex < 4) return null;
 
@@ -221,10 +281,10 @@ export class StageDirector {
     const bright = this.smoothedBrightness;
     const roll = this.rng.next();
 
-    // A gap spans a whole beat, so at slow tempi it can be wider than a jump
-    // can carry. Only cut one when it demonstrably fits inside the jump arc.
-    const gapFits = segmentWidth <= GAP_SAFETY_FACTOR * maxJumpDistance(this.runSpeed);
-    if (gapFits && this.smoothedIntensity > 0.25 && roll < 0.15) return 'gap';
+    // The hole is cut inside the beat and sized to the jump arc, so it always
+    // fits; it just needs enough beat left over for solid ground either side.
+    const roomForGap = segmentWidth >= MIN_SEGMENT_WIDTH * 3;
+    if (roomForGap && this.smoothedIntensity > 0.25 && roll < 0.15) return 'gap';
 
     return roll < 0.5 + (0.5 - bright) * 0.6 ? 'block' : 'hanging';
   }
@@ -234,19 +294,26 @@ export class StageDirector {
     segmentX: number,
     segmentWidth: number,
     beatIndex: number,
+    heightBudget: number,
   ): Obstacle {
     // Sized against what a full-strength jump can actually clear at the current
     // speed, so a fair stage stays fair as the tempo pushes the speed up.
-    const reach = maxJumpHeight();
-    const width = clamp(segmentWidth * this.rng.range(0.22, 0.4), 0.7, 2.6);
+    // A block has to fit inside the jump arc with room either side. At slow
+    // tempo the beats are long, and an unbounded share of one produced blocks
+    // nearly as wide as a whole jump — clearable only by landing exactly on the
+    // far edge, which is to say not clearable.
+    const widest = Math.min(MAX_OBSTACLE_WIDTH, maxFairBlockWidth());
+    const width = clamp(segmentWidth * this.rng.range(0.22, 0.4), MIN_OBSTACLE_WIDTH, widest);
     // Centre it in the beat so the jump happens on the beat, not on its edge.
     const x = segmentX + (segmentWidth - width) / 2;
 
     if (kind === 'block') {
+      // The budget is already the fair ceiling for this beat, so the roll
+      // spans it directly rather than being scaled down by another guess.
       const height = clamp(
-        this.rng.range(0.7, 0.55 * reach) * (0.7 + this.smoothedIntensity),
-        0.6,
-        0.62 * reach,
+        this.rng.range(MIN_BLOCK_HEIGHT, heightBudget) * (0.7 + this.smoothedIntensity),
+        MIN_BLOCK_HEIGHT,
+        heightBudget,
       );
       return {
         id: this.nextObstacleId++,
@@ -284,6 +351,7 @@ export class StageDirector {
     this.nextBeatIndex = 0;
     this.nextObstacleId = 1;
     this.consecutiveObstacles = 0;
+    this.lastJumpHazardEndX = -Infinity;
     this.lastSegmentHeight = 0;
   }
 }

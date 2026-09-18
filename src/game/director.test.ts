@@ -3,7 +3,8 @@ import type { BeatEstimate } from '../audio/analysis/beat';
 import type { AudioFeatures } from '../audio/analysis/features';
 import { SILENT_FEATURES } from '../audio/analysis/features';
 import { Rng } from '../core/rng';
-import { maxJumpDistance, maxJumpHeight, StageDirector } from './director';
+import { StageDirector } from './director';
+import { maxFairBlockHeight, maxFairBlockWidth, maxFairGapWidth } from './jump';
 import { TUNING } from './tuning';
 import type { WorldSlice } from './world';
 import { groundHeightAt } from './world';
@@ -135,24 +136,78 @@ describe('StageDirector', () => {
     expect(unsure).toBeLessThan(confident);
   });
 
-  it('never cuts a gap wider than a jump can carry', () => {
+  it('never cuts a gap wider than a jump can carry, at any tempo', () => {
     // Slow tempo means wide beats, which is exactly where an unguarded
     // generator would produce an unjumpable hole.
     for (const bpm of [60, 75, 90, 120, 160, 200]) {
-      const { slice, director } = run(9, LOUD, beatAt(bpm), 12);
+      const { slice } = run(9, LOUD, beatAt(bpm), 12);
       const gaps = slice.segments.filter((segment) => !segment.solid);
       for (const gap of gaps) {
-        expect(gap.width).toBeLessThanOrEqual(0.6 * maxJumpDistance(director.speed) + 1e-6);
+        expect(gap.width).toBeLessThanOrEqual(maxFairGapWidth() + 1e-6);
       }
     }
   });
 
-  it('never places a block taller than a jump can clear', () => {
+  it('still cuts gaps at slow tempos rather than suppressing them', () => {
+    // A whole-beat hole cannot be jumped below ~200 BPM, so sizing the hole to
+    // the beat quietly removed the obstacle type from most music. Holes are
+    // deliberately rare, so this needs a long run to sample any.
+    const { slice } = run(9, LOUD, beatAt(90), 60);
+    expect(slice.segments.some((segment) => !segment.solid)).toBe(true);
+  });
+
+  it('leaves solid ground either side of every hole', () => {
+    const { slice } = run(9, LOUD, beatAt(90), 60);
+    const ordered = [...slice.segments].sort((a, b) => a.x - b.x);
+    const holes = ordered.filter((s) => !s.solid);
+    expect(holes.length).toBeGreaterThan(0);
+    for (const hole of holes) {
+      const index = ordered.indexOf(hole);
+      expect(ordered[index - 1]?.solid).toBe(true);
+      expect(ordered[index + 1]?.solid).toBe(true);
+    }
+  });
+
+  it('never places a block taller or wider than a reference jump can clear', () => {
     const { slice } = run(11, LOUD, beatAt(140), 12);
     const blocks = slice.obstacles.filter((obstacle) => obstacle.kind === 'block');
     expect(blocks.length).toBeGreaterThan(0);
     for (const block of blocks) {
-      expect(block.height).toBeLessThan(maxJumpHeight());
+      expect(block.height).toBeLessThanOrEqual(maxFairBlockHeight() + 1e-6);
+      expect(block.width).toBeLessThanOrEqual(maxFairBlockWidth() + 1e-6);
+    }
+  });
+
+  it('charges a terrain step against the block on top of it', () => {
+    // A block on a beat that also rises has to be cleared from the lower ground
+    // the player took off from, so the two heights share one budget.
+    const { slice } = run(11, () => features({ energy: 0.6, bass: 0.9 }), beatAt(120), 20);
+    const byBeat = new Map<number, number>();
+    for (const segment of slice.segments) {
+      if (segment.solid) byBeat.set(segment.beatIndex, segment.height);
+    }
+    for (const block of slice.obstacles.filter((o) => o.kind === 'block')) {
+      const here = byBeat.get(block.beatIndex);
+      const before = byBeat.get(block.beatIndex - 1);
+      if (here === undefined || before === undefined) continue;
+      const rise = Math.max(0, here - before);
+      expect(rise + block.height).toBeLessThanOrEqual(maxFairBlockHeight() + 1e-6);
+    }
+  });
+
+  it('leaves a full jump of clear ground after anything that must be jumped', () => {
+    const { slice } = run(11, LOUD, beatAt(160), 20);
+    const jumpHazards = [
+      ...slice.obstacles
+        .filter((o) => o.kind === 'block')
+        .map((o) => ({ left: o.x, right: o.x + o.width })),
+      ...slice.segments.filter((s) => !s.solid).map((s) => ({ left: s.x, right: s.x + s.width })),
+    ].sort((a, b) => a.left - b.left);
+
+    for (let i = 1; i < jumpHazards.length; i++) {
+      const gap = jumpHazards[i]!.left - jumpHazards[i - 1]!.right;
+      // Otherwise the next hazard arrives while the player is still airborne.
+      expect(gap).toBeGreaterThan(0);
     }
   });
 
