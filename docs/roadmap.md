@@ -32,6 +32,8 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **Accessibility.** Voice control excludes some players by construction, which is why keyboard and touch are first-class rather than a debug affordance. Beyond that: a visual-only mode, adjustable trigger thresholds, and reduced-motion handling for the parallax.
 
+**Strip source maps from native builds.** `cap sync` copies `dist/` wholesale into the APK, so the 2.2MB of `.map` files Vite emits ship inside it — about half the 4.8MB debug APK, and they publish the original source. Fine for a debug build, not for a store release: either drop `build.sourcemap` for native builds or delete the maps between `vite build` and `cap copy`.
+
 ## Known deferred decisions
 
 **TypeScript 7.** Stable since before this scaffold, but `typescript-eslint` still declares `typescript <6.1.0`, so adopting it means losing type-aware linting. Pinned at 6.0.3 until typescript-eslint ships support; revisit then.
