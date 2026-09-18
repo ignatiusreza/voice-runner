@@ -89,6 +89,16 @@ export class AudioEngine {
     return this.context?.sampleRate ?? 48000;
   }
 
+  /**
+   * The stage source's underlying stream, when it has one.
+   *
+   * Only the capture sources do — a decoded file has no `MediaStream`. Used by
+   * the dev recorder to capture a fixed clip for repeatable measurement.
+   */
+  get stageStream(): MediaStream | null {
+    return this.stageAttachment?.stream ?? null;
+  }
+
   /** Seconds since the context started. Shared clock for features and beats. */
   get time(): number {
     return this.context?.currentTime ?? 0;

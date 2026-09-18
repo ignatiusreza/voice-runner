@@ -3,7 +3,9 @@ import type { AudioFeatures } from './audio/analysis/features';
 import type { VoiceFrame } from './audio/analysis/voice';
 import type { AudioEngineOptions } from './audio/engine';
 import { AudioEngine } from './audio/engine';
+import { createFileSource } from './audio/sources/file';
 import { createSyntheticSource } from './audio/sources/synthetic';
+import { loadTrack, recordStream, saveTrack } from './audio/recorder';
 import { GameLoop } from './core/loop';
 import { seedFromString } from './core/rng';
 import { Game } from './game/game';
@@ -34,6 +36,13 @@ const game = new Game(seedFromString(new Date().toDateString()));
  * audio permissions, and gives the generator a known tempo to be tuned against.
  */
 const demoMode = readDemoMode();
+
+/** `?record=20` captures 20s of the shared source; `?replay` plays it back. */
+const params = new URLSearchParams(window.location.search);
+const recordSeconds = params.has('record')
+  ? Number.parseFloat(params.get('record') ?? '') || 20
+  : 0;
+const isReplay = params.has('replay');
 
 if (demoMode) {
   startButton.textContent = 'Run the demo track';
@@ -238,7 +247,20 @@ async function begin(): Promise<void> {
   startButton.textContent = 'Starting…';
 
   try {
-    const engineStatus = await audio.start(demoMode ?? {});
+    // Replay mode swaps the live capture for the recorded clip, so every run
+    // analyses byte-identical audio. Without that, a measurement compares two
+    // different pieces of music and says nothing about the code.
+    let options = demoMode ?? {};
+    if (isReplay) {
+      const track = await loadTrack();
+      if (!track) throw new Error('No clip recorded yet — run with ?record=20 first.');
+      options = {
+        stageProviders: [createFileSource(track.blob, `Recorded clip (${String(track.seconds)}s)`)],
+        useMicrophone: false,
+      };
+    }
+
+    const engineStatus = await audio.start(options);
     hud.setSource(engineStatus.stageSourceLabel);
 
     if (!engineStatus.voiceReady) {
@@ -258,6 +280,20 @@ async function begin(): Promise<void> {
 
     await renderer.init(stage);
     keyboard.attach(window);
+
+    if (recordSeconds > 0) {
+      const stream = audio.stageStream;
+      if (!stream) throw new Error('This stage source cannot be recorded (no media stream).');
+      status.textContent = `Recording ${String(recordSeconds)}s of the shared audio…`;
+      const blob = await recordStream(stream, recordSeconds);
+      await saveTrack({ blob, seconds: recordSeconds, recordedAt: Date.now() });
+      status.textContent =
+        `Recorded ${(blob.size / 1024).toFixed(0)} kB. Reload with ?replay to measure ` +
+        'against it repeatedly.';
+      startButton.disabled = false;
+      startButton.textContent = 'Recorded';
+      return;
+    }
 
     started = true;
     // Leave the button in its restart state. It is behind the hidden overlay
@@ -284,10 +320,17 @@ function showGameOver(): void {
 
 // The context is suspended when the app is backgrounded; resuming mid-run would
 // hand the simulation a huge time jump, so pause the run instead.
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) loop.stop();
-  else if (game.snapshot.phase === 'running') loop.start();
-});
+//
+// `?measure` suppresses that. Analysis is driven by the render loop, so pausing
+// it makes each run sample a different subset of the audio — identical clips
+// measured beat lock at 0.14 and 0.42 purely because of when the tab lost
+// focus. Measurement needs the loop to keep running.
+if (!params.has('measure')) {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) loop.stop();
+    else if (game.snapshot.phase === 'running') loop.start();
+  });
+}
 
 function requireElement(id: string): HTMLElement {
   const element = document.getElementById(id);

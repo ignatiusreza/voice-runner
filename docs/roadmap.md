@@ -36,6 +36,12 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **Strip source maps from native builds.** `cap sync` copies `dist/` wholesale into the APK, so the 2.2MB of `.map` files Vite emits ship inside it — about half the 4.8MB debug APK, and they publish the original source. Fine for a debug build, not for a store release: either drop `build.sourcemap` for native builds or delete the maps between `vite build` and `cap copy`.
 
+**Move analysis off the render loop.** `AudioEngine.sample()` is called from `render()`, so feature extraction and beat tracking only advance when a frame is drawn. A backgrounded tab stops `requestAnimationFrame` entirely, which means the analysis simply stops — and with it any measurement. It also makes every metric depend on frame timing: the _same recorded clip_ measured beat lock at 0.14 and 0.42 on consecutive runs purely because of when the tab lost focus.
+
+An `AudioWorkletProcessor` is the right home. It runs on the audio thread at a fixed block rate regardless of tab visibility or frame rate, which makes the analysis deterministic, immune to backgrounding, and measurable. That is the prerequisite for any further tuning of the tracker, and it fixes a real gameplay bug too — today the stage stops responding to music the moment the tab is occluded.
+
+**A deterministic benchmark.** With analysis off the render loop, the recorded clip (see `?record` / `?replay`) can be run through the pipeline at a fixed hop from a test, reporting beat lock, flash concentration and tempo stability as numbers that mean the same thing every run. Without that, tuning is guesswork dressed up as measurement.
+
 **Onset peak-picking.** The flash fires on onset strength crossing a scaled threshold, which trades sensitivity against selectivity badly: measured on real music, a high threshold flashed 4 times in 30s but landed on the beat (concentration 0.70), a low one flashed 44 times and landed anywhere (0.02). Requiring a local maximum — the standard peak-picking rule — decides those independently instead of forcing one constant to do both jobs.
 
 **Beat detection on difficult material.** Generation now locks tightly to the beat _when the beat is known_ — 0.88 against a known tempo. On real music the tracker is the weak link: confidence averages around 0.40 and the tempo estimate still reports octave errors on sparse or rubato passages, which caps end-to-end sync near 0.71. Better onset detection and a proper tempo-hypothesis tracker are the next lever, not more generator tuning.
