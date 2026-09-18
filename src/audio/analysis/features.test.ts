@@ -44,6 +44,23 @@ describe('FeatureExtractor', () => {
     expect(bright.brightness).toBeGreaterThan(dark.brightness);
   });
 
+  it('reports onsets above the idling level, not raw spectral change', () => {
+    const extractor = new FeatureExtractor(SAMPLE_RATE);
+    // Sustained content swelling steadily: flux is continuously positive, but
+    // nothing is *starting*. This is what keeps raw flux permanently lifted on
+    // real music — measured at a floor of 0.16 where a click track reached 0.
+    let steady = 0;
+    for (let i = 0; i < 240; i++) {
+      steady = extractor.extract(spectrumInBand(40, 2000, 0.2 + i * 0.002), i / 60).flux;
+    }
+    expect(steady).toBeLessThan(0.01);
+
+    // A real transient still stands clear of that baseline.
+    const hit = extractor.extract(spectrumInBand(40, 2000, 1), 240 / 60);
+    expect(hit.flux).toBeGreaterThan(0.05);
+    expect(hit.flux).toBeGreaterThan(steady * 10);
+  });
+
   it('reports flux only on growth, not on decay', () => {
     const extractor = new FeatureExtractor(SAMPLE_RATE);
     extractor.extract(spectrumInBand(40, 200, 0.1), 0);

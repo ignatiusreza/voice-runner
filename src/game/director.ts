@@ -109,8 +109,17 @@ export class StageDirector {
   private readonly intensityScale = new AdaptiveScale(0.08);
   private readonly weightScale = new AdaptiveScale(0.45);
   private readonly brightnessScale = new AdaptiveScale(0.2);
-  /** Flux measured on real music peaked near 0.29 with a mean around 0.04. */
-  private readonly onsetScale = new AdaptiveScale(0.12, 4);
+  /**
+   * Onset strength is measured above its own baseline now, so the numbers are
+   * much smaller than raw flux: peaks near 0.09 on real music, not 0.29.
+   *
+   * This trades sensitivity against selectivity and was set by measurement. At
+   * 0.12 the flash fired 4 times in 30s but landed on the beat (concentration
+   * 0.70); at 0.04 it fired 44 times and landed anywhere (0.02). Proper
+   * peak-picking — requiring a local maximum, not just a level — would beat
+   * any single threshold here; see docs/roadmap.md.
+   */
+  private readonly onsetScale = new AdaptiveScale(0.07, 4);
 
   private smoothedIntensity = 0;
   private smoothedBrightness = 0.35;

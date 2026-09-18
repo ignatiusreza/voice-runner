@@ -36,7 +36,11 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **Strip source maps from native builds.** `cap sync` copies `dist/` wholesale into the APK, so the 2.2MB of `.map` files Vite emits ship inside it — about half the 4.8MB debug APK, and they publish the original source. Fine for a debug build, not for a store release: either drop `build.sourcemap` for native builds or delete the maps between `vite build` and `cap copy`.
 
-**Beat detection on difficult material.** Generation now locks tightly to the beat _when the beat is known_ — 0.88 against a known tempo. On real music the tracker is the weak link: confidence averages around 0.40 and the tempo estimate still reports octave errors on sparse or rubato passages, which caps end-to-end sync near 0.71. Better onset detection (per-band flux with adaptive thresholds) and a proper tempo-hypothesis tracker are the next lever, not more generator tuning.
+**Onset peak-picking.** The flash fires on onset strength crossing a scaled threshold, which trades sensitivity against selectivity badly: measured on real music, a high threshold flashed 4 times in 30s but landed on the beat (concentration 0.70), a low one flashed 44 times and landed anywhere (0.02). Requiring a local maximum — the standard peak-picking rule — decides those independently instead of forcing one constant to do both jobs.
+
+**Beat detection on difficult material.** Generation now locks tightly to the beat _when the beat is known_ — 0.88 against a known tempo. On real music the tracker is the weak link: confidence averages around 0.40 and the tempo estimate still reports octave errors on sparse or rubato passages, which caps end-to-end sync near 0.71. Better onset detection and a proper tempo-hypothesis tracker are the next lever, not more generator tuning.
+
+Measurement itself is the obstacle here: on a live stream every run hears different material, and the same code measured beat lock at 0.22, 0.28, 0.61 and 0.71 across passages of one track. Tuning against that is chasing noise. The `file` source exists to fix this — a fixed local track would make the numbers repeatable, which is a prerequisite for tuning the tracker at all.
 
 ## Known deferred decisions
 

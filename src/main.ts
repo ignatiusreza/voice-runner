@@ -111,6 +111,31 @@ let syncSin = 0;
 let syncCount = 0;
 let lastCrossedBeat: number | null = null;
 
+/** Same statistic for the onset flash: does it land on the beat, or anywhere? */
+let flashCos = 0;
+let flashSin = 0;
+let flashCount = 0;
+let flashArmed = true;
+let loudFrames = 0;
+let totalFrames = 0;
+
+function recordFlash(): void {
+  const pulse = game.snapshot.mood.pulse;
+  totalFrames += 1;
+  if (pulse > 0.5) loudFrames += 1;
+
+  // Rising edge only, so one hit counts once however long it takes to fade.
+  if (pulse > 0.6 && flashArmed) {
+    flashArmed = false;
+    const phase = audio.beats.phaseAt(audio.time) * Math.PI * 2;
+    flashCos += Math.cos(phase);
+    flashSin += Math.sin(phase);
+    flashCount += 1;
+  } else if (pulse < 0.25) {
+    flashArmed = true;
+  }
+}
+
 function recordSync(): void {
   const snapshot = game.snapshot;
   const x = snapshot.player.x;
@@ -146,6 +171,7 @@ function recordProbe(): void {
     speed: game.snapshot.speed,
   };
   recordSync();
+  recordFlash();
 
   for (const [key, value] of Object.entries(samples)) {
     const stat = probe.get(key) ?? { min: Infinity, max: -Infinity, sum: 0, n: 0 };
@@ -166,7 +192,19 @@ if (import.meta.env.DEV) {
         syncSin = 0;
         syncCount = 0;
         lastCrossedBeat = null;
+        flashCos = 0;
+        flashSin = 0;
+        flashCount = 0;
+        flashArmed = true;
+        loudFrames = 0;
+        totalFrames = 0;
       },
+      /** Do the onset flashes land on the beat, and how often do they fire? */
+      flash: (): { hits: number; onBeat: number; visibleFraction: number } => ({
+        hits: flashCount,
+        onBeat: flashCount === 0 ? 0 : +(Math.hypot(flashCos, flashSin) / flashCount).toFixed(3),
+        visibleFraction: totalFrames === 0 ? 0 : +(loudFrames / totalFrames).toFixed(3),
+      }),
       /** 1 = every beat boundary lands at the same phase, 0 = no relationship. */
       sync: (): { crossings: number; lock: number } => ({
         crossings: syncCount,
