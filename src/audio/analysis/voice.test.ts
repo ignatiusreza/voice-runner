@@ -23,7 +23,7 @@ function noise(length: number, amplitude: number, seed = 1): Float32Array {
 
 describe('detectPitch', () => {
   it('finds the fundamental of a clean tone', () => {
-    const result = detectPitch(sine(220, 4096), SAMPLE_RATE, 70, 600);
+    const result = detectPitch(sine(220, 4096), SAMPLE_RATE, 70, 400);
     expect(result.pitchHz).toBeGreaterThan(215);
     expect(result.pitchHz).toBeLessThan(225);
     expect(result.clarity).toBeGreaterThan(0.8);
@@ -31,18 +31,35 @@ describe('detectPitch', () => {
 
   it('does not octave-error on a loud, clipped tone', () => {
     const clipped = sine(150, 4096, 1).map((value) => Math.max(-0.8, Math.min(0.8, value * 3)));
-    const result = detectPitch(clipped, SAMPLE_RATE, 70, 600);
+    const result = detectPitch(clipped, SAMPLE_RATE, 70, 400);
     expect(result.pitchHz).toBeGreaterThan(145);
     expect(result.pitchHz).toBeLessThan(156);
   });
 
   it('reports no pitch for noise', () => {
-    const result = detectPitch(noise(4096, 0.4), SAMPLE_RATE, 70, 600);
+    const result = detectPitch(noise(4096, 0.4), SAMPLE_RATE, 70, 400);
     expect(result.pitchHz).toBe(0);
   });
 
+  it('never reads high-frequency content as a low pitch', () => {
+    // Cymbals and sibilance alias when the signal is decimated, and an aliased
+    // tone will always find some period. The only thing that must hold is that
+    // it never lands below the duck threshold, or music alone would make the
+    // character slide. `VoiceController` ducks under 130Hz.
+    for (const hz of [3000, 5000, 7000, 9000]) {
+      const result = detectPitch(sine(hz, 4096), SAMPLE_RATE, 70, 400);
+      if (result.pitchHz > 0) expect(result.pitchHz).toBeGreaterThan(130);
+    }
+  });
+
+  it('still resolves the top of the search range after decimation', () => {
+    const result = detectPitch(sine(380, 4096), SAMPLE_RATE, 70, 400);
+    expect(result.pitchHz).toBeGreaterThan(365);
+    expect(result.pitchHz).toBeLessThan(395);
+  });
+
   it('returns nothing when the search range is degenerate', () => {
-    expect(detectPitch(sine(220, 64), SAMPLE_RATE, 70, 600).pitchHz).toBe(0);
+    expect(detectPitch(sine(220, 64), SAMPLE_RATE, 70, 400).pitchHz).toBe(0);
   });
 });
 

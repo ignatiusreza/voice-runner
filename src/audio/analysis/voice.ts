@@ -31,7 +31,10 @@ const DEFAULTS = {
   floorFallHalfLife: 0.4,
   floorRiseHalfLife: 4.0,
   minPitchHz: 70,
-  maxPitchHz: 600,
+  // Above this, integer-lag quantisation starts octave-erroring. It is far
+  // above any voice fundamental the duck threshold cares about, and a misread
+  // scream still reads as "not low", so the game is unaffected.
+  maxPitchHz: 400,
 };
 
 /** Below this the frame is silence and pitch detection is not worth running. */
@@ -126,11 +129,18 @@ function rootMeanSquare(samples: Float32Array): number {
  * loud, clipped signals a shouting player produces.
  */
 export function detectPitch(
-  samples: Float32Array,
-  sampleRate: number,
+  rawSamples: Float32Array,
+  rawSampleRate: number,
   minHz: number,
   maxHz: number,
 ): { pitchHz: number; clarity: number } {
+  // YIN is O(lagRange × windowLength), which at 48kHz is well over a million
+  // operations per frame — enough to matter on a phone at 60fps. Voice pitch
+  // tops out at a few hundred Hz, so the signal is decimated first: the work
+  // drops with the square of the factor and nothing in the band of interest is
+  // lost.
+  const { samples, sampleRate } = decimate(rawSamples, rawSampleRate);
+
   const maxLag = Math.min(Math.floor(sampleRate / minHz), Math.floor(samples.length / 2));
   const minLag = Math.max(2, Math.floor(sampleRate / maxHz));
   if (maxLag <= minLag) return { pitchHz: 0, clarity: 0 };
@@ -182,6 +192,45 @@ export function detectPitch(
     pitchHz: sampleRate / refinedLag,
     clarity: clamp(1 - normalised[chosenLag]!, 0, 1),
   };
+}
+
+/**
+ * Rate the pitch search runs at, in Hz.
+ *
+ * YIN resolves a period to integer lags, so the shortest period searched needs
+ * enough samples not to octave-error — at 9.6kHz a 400Hz tone is 24 samples,
+ * which is comfortable, and the cost is a 25x reduction in work.
+ *
+ * The box filter does not fully suppress content above the decimated Nyquist,
+ * and no cheap filter would: an aliased pure tone stays a pure tone, so it will
+ * always find *some* period. What matters is where it lands. Folded content
+ * ends up at short lags, i.e. read as a high pitch, and the only pitch decision
+ * the game makes is "is this below the duck threshold" — so a misread here
+ * costs nothing. See the high-frequency case in the tests.
+ */
+const ANALYSIS_RATE_HZ = 9600;
+
+/**
+ * Box-filters and decimates towards `ANALYSIS_RATE_HZ`. The box filter is the
+ * anti-alias stage: decimating without one folds high-frequency content down
+ * into the voice band.
+ */
+function decimate(
+  samples: Float32Array,
+  sampleRate: number,
+): { samples: Float32Array; sampleRate: number } {
+  const factor = Math.floor(sampleRate / ANALYSIS_RATE_HZ);
+  if (factor < 2) return { samples, sampleRate };
+
+  const length = Math.floor(samples.length / factor);
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    let sum = 0;
+    const start = i * factor;
+    for (let j = 0; j < factor; j++) sum += samples[start + j]!;
+    out[i] = sum / factor;
+  }
+  return { samples: out, sampleRate: sampleRate / factor };
 }
 
 /** Sub-sample the minimum so pitch does not quantise to integer lags. */
