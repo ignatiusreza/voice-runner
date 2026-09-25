@@ -282,11 +282,36 @@ function showGameOver(): void {
 // The context is suspended when the app is backgrounded; resuming mid-run would
 // hand the simulation a huge time jump, so pause the run instead. The audio
 // analysis keeps going regardless — it lives on the audio thread.
+//
+// The microphone is let go at the same time. On Android an open mic is treated
+// as a call: it pauses the player's music app and flips Bluetooth headphones
+// into their call profile, and a page that goes away still holding it can
+// leave the headset stuck there after the browser is closed.
 if (!params.has('measure')) {
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) loop.stop();
-    else if (game.snapshot.phase === 'running') loop.start();
+    if (document.hidden) {
+      loop.stop();
+      audio.releaseMicrophone();
+    } else {
+      if (started) void reacquireMicrophone();
+      if (game.snapshot.phase === 'running') loop.start();
+    }
   });
+}
+// `pagehide` fires on close and navigation, sometimes without a preceding
+// `visibilitychange`, and is the last chance to hand the mic back.
+window.addEventListener('pagehide', () => {
+  audio.releaseMicrophone();
+});
+
+async function reacquireMicrophone(): Promise<void> {
+  try {
+    await audio.reacquireMicrophone();
+  } catch (error) {
+    overlay.setStatus(
+      `Microphone unavailable: ${error instanceof Error ? error.message : String(error)}\nSpace jumps, Down slides.`,
+    );
+  }
 }
 
 function requireElement(id: string): HTMLElement {
