@@ -68,7 +68,10 @@ describe('Overlay', () => {
 
   it('reveals the voice meter only while calibrating', () => {
     const { root, overlay } = build();
-    const meter = (): boolean => root.querySelector<HTMLElement>('[data-role="meter-row"]')!.hidden;
+    // `hidden` is `boolean | "until-found"` in the DOM lib, so compare rather
+    // than returning it.
+    const meter = (): boolean =>
+      root.querySelector<HTMLElement>('[data-role="meter-row"]')!.hidden === true;
 
     overlay.showTitle();
     expect(meter()).toBe(true);
