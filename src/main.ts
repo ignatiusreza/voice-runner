@@ -299,9 +299,14 @@ if (!params.has('measure')) {
   });
 }
 // `pagehide` fires on close and navigation, sometimes without a preceding
-// `visibilitychange`, and is the last chance to hand the mic back.
-window.addEventListener('pagehide', () => {
+// `visibilitychange`, and is the last chance to hand the mic back. A page that
+// is really going away (not into the back/forward cache) closes the context
+// outright rather than leaving the browser to tear it down whenever it
+// actually discards the tab — on Android that can be well after the tab is
+// gone from view, since a closed tab is kept around for "undo".
+window.addEventListener('pagehide', (event) => {
   audio.releaseMicrophone();
+  if (!event.persisted) void audio.stop();
 });
 
 async function reacquireMicrophone(): Promise<void> {

@@ -81,6 +81,8 @@ export class AudioEngine {
   private micGeneration = 0;
   /** Set while the microphone is released because the page went away. */
   private micReleased = false;
+  /** Set when `releaseMicrophone` suspended the context, so only it resumes it. */
+  private contextSuspended = false;
   /** Voice control was asked for and not refused, so a release should restore it. */
   private wantsVoice = false;
   /** The stage was on the room mic when it was released, so restore it too. */
@@ -223,9 +225,12 @@ export class AudioEngine {
    * closed without stopping its tracks can leave the headset stuck there. So
    * the microphone is only held while the game is actually on screen.
    *
-   * Other stage sources (tab capture, a file) are left alone — tab capture in
-   * particular is expected to keep running while the player looks at the tab
-   * they shared.
+   * Stopping the tracks is not always enough: the context's output stream can
+   * be reopened as a voice-call stream while the mic is live, and it keeps
+   * the headset on the call route after the tracks are gone. So the context
+   * is suspended too, which stops its output stream. The exception is tab
+   * capture, which is expected to keep feeding the stage while the player
+   * looks at the tab they shared.
    */
   releaseMicrophone(): void {
     this.micGeneration += 1;
@@ -247,12 +252,26 @@ export class AudioEngine {
       this.micReleased = true;
       this.restoreStageMic ||= stageOnMic;
     }
+
+    const context = this.context;
+    if (
+      context?.state === 'running' &&
+      this.stageAttachment?.descriptor.kind !== 'display-capture'
+    ) {
+      this.contextSuspended = true;
+      void context.suspend();
+    }
   }
 
   /** Re-opens whatever `releaseMicrophone` closed. Safe to call when nothing was. */
   async reacquireMicrophone(): Promise<void> {
     const context = this.context;
-    if (!context || !this.micReleased) return;
+    if (!context) return;
+    if (this.contextSuspended) {
+      this.contextSuspended = false;
+      await context.resume();
+    }
+    if (!this.micReleased) return;
     this.micReleased = false;
     const generation = this.micGeneration;
 
@@ -401,6 +420,7 @@ export class AudioEngine {
     this.stageNode = null;
     this.micGeneration += 1;
     this.micReleased = false;
+    this.contextSuspended = false;
     this.wantsVoice = false;
     this.restoreStageMic = false;
     this.voiceSourceNode?.disconnect();
