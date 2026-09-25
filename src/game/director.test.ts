@@ -318,16 +318,52 @@ describe('StageDirector', () => {
     director.update(slice, 0, 0, quiet, beatAt(120), STEP);
     expect(director.mood.pulse).toBe(0);
 
-    // A hit has to show on the very frame it lands; a smoothed rise would put
-    // the flash late, which reads worse than no flash at all.
+    // A peak is only knowable once it has passed, so the flash lands one frame
+    // after the onset — about 11ms at the worklet's rate, far under perception.
+    // Any more than that and the flash would read as late.
     director.update(slice, 0, STEP, hit, beatAt(120), STEP);
+    director.update(slice, 0, 2 * STEP, quiet, beatAt(120), STEP);
     expect(director.mood.pulse).toBeGreaterThan(0.8);
 
     // And it has to be gone well inside a beat, or it is a wash not a hit.
     for (let i = 0; i < 0.25 / STEP; i++) {
-      director.update(slice, 0, (i + 2) * STEP, quiet, beatAt(120), STEP);
+      director.update(slice, 0, (i + 3) * STEP, quiet, beatAt(120), STEP);
     }
     expect(director.mood.pulse).toBeLessThan(0.2);
+  });
+
+  it('ignores a slow swell that never peaks', () => {
+    // The old level test fired on anything loud enough, so sustained content
+    // flashed continuously. A rising ramp has no local maximum and is not a hit.
+    const director = new StageDirector(new Rng(79));
+    const slice: WorldSlice = { segments: [], obstacles: [] };
+    let peak = 0;
+    for (let i = 0; i < 90; i++) {
+      director.update(
+        slice,
+        0,
+        i * STEP,
+        features({ energy: 0.3, bass: 0.3, flux: i * 0.004 }),
+        beatAt(120),
+        STEP,
+      );
+      peak = Math.max(peak, director.mood.pulse);
+    }
+    expect(peak).toBe(0);
+  });
+
+  it('gets harder the further the run goes', () => {
+    // Density tracks the music, but a long quiet track used to stay equally
+    // easy however far the player got.
+    const early = run(83, LOUD, beatAt(120), 12);
+    const late = run(83, LOUD, beatAt(120), 90);
+
+    const perMetre = (r: typeof early, fromX: number, toX: number): number => {
+      const inRange = r.slice.obstacles.filter((o) => o.x >= fromX && o.x < toX);
+      return inRange.length / (toX - fromX);
+    };
+
+    expect(perMetre(late, 800, 1000)).toBeGreaterThan(perMetre(early, 0, 200));
   });
 
   it('follows the music into a brighter palette', () => {

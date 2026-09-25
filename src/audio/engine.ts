@@ -36,6 +36,15 @@ export interface AudioEngineOptions {
    * which looks to the player like the game has hung.
    */
   useMicrophone?: boolean;
+  /**
+   * How long to wait for the microphone before starting without it.
+   *
+   * A permission prompt the player never answers leaves `getUserMedia` pending
+   * for as long as the dialog is open, which used to leave the start button on
+   * "Starting…" indefinitely. Setup continues after this, and the voice chain
+   * is wired up later if the player does eventually allow it.
+   */
+  microphoneTimeoutMs?: number;
 }
 
 export interface AudioEngineStatus {
@@ -67,6 +76,9 @@ export class AudioEngine {
   private readonly waveform = new Float32Array(FFT_SIZE);
 
   private voice: VoiceAnalyser | null = null;
+  private micNotice: string | null = null;
+  /** Fires if the microphone arrives after setup gave up waiting for it. */
+  onVoiceReady: (() => void) | null = null;
 
   /** Latest analysis posted from the audio thread. */
   private stageFeatures: AudioFeatures = SILENT_FEATURES;
@@ -109,7 +121,7 @@ export class AudioEngine {
    * and `getUserMedia` outside one.
    */
   async start(options: AudioEngineOptions = {}): Promise<AudioEngineStatus> {
-    const { stageProviders, useMicrophone = true } = options;
+    const { stageProviders, useMicrophone = true, microphoneTimeoutMs = 6000 } = options;
     const context = new AudioContext({ latencyHint: 'interactive' });
     this.context = context;
     const notices: string[] = [];
@@ -120,18 +132,26 @@ export class AudioEngine {
     if (!useMicrophone) {
       notices.push('Microphone skipped — keyboard controls only.');
     } else {
-      try {
-        this.voiceStream = await openMicrophone(context);
-        const micNode = context.createMediaStreamSource(this.voiceStream);
-        this.voiceAnalyserNode = context.createAnalyser();
-        this.voiceAnalyserNode.fftSize = FFT_SIZE;
-        this.voiceAnalyserNode.smoothingTimeConstant = 0;
-        micNode.connect(this.voiceAnalyserNode);
-        this.voice = new VoiceAnalyser({ sampleRate: context.sampleRate });
-        voiceReady = true;
-      } catch (error) {
+      const pending = openMicrophone(context).then(
+        (stream) => {
+          this.adoptMicrophone(context, stream);
+          return true;
+        },
+        (error: unknown) => {
+          this.micNotice = `Microphone unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          return false;
+        },
+      );
+
+      // Don't block setup on a prompt nobody has answered. If the player allows
+      // it later, `adoptMicrophone` wires the voice chain up then.
+      voiceReady = await Promise.race([pending, delay(microphoneTimeoutMs).then(() => false)]);
+      if (!voiceReady) {
         notices.push(
-          `Microphone unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          this.micNotice ??
+            'Still waiting on microphone permission — starting with keyboard controls.',
         );
       }
     }
@@ -139,26 +159,14 @@ export class AudioEngine {
     const { attached, failures } = await attachBestStageSource(context, stageProviders);
     for (const failure of failures) notices.push(`${failure.kind}: ${failure.message}`);
 
-    if (attached) {
-      this.stageAttachment = attached;
-      try {
-        await context.audioWorklet.addModule(processorUrl);
-        this.stageNode = new AudioWorkletNode(context, 'stage-analysis', {
-          numberOfInputs: 1,
-          numberOfOutputs: 0,
-        });
-        this.stageNode.port.onmessage = (event: MessageEvent<AnalysisMessage>): void => {
-          const { features, bpm, period, anchor, confidence, stability } = event.data;
-          this.stageFeatures = features;
-          this.stageBeat = { bpm, period, anchor, confidence, stability };
-        };
-        attached.node.connect(this.stageNode);
-      } catch (error) {
-        notices.push(
-          `Stage analysis unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    try {
+      await this.ensureAnalysisNode(context);
+    } catch (error) {
+      notices.push(
+        `Stage analysis unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+    if (attached) this.connectStage(attached);
 
     this.status = {
       stageSourceLabel: attached?.descriptor.label ?? 'none — using a fixed rhythm',
@@ -167,6 +175,59 @@ export class AudioEngine {
       notices,
     };
     return this.status;
+  }
+
+  private adoptMicrophone(context: AudioContext, stream: MediaStream): void {
+    this.voiceStream = stream;
+    const micNode = context.createMediaStreamSource(stream);
+    this.voiceAnalyserNode = context.createAnalyser();
+    this.voiceAnalyserNode.fftSize = FFT_SIZE;
+    this.voiceAnalyserNode.smoothingTimeConstant = 0;
+    micNode.connect(this.voiceAnalyserNode);
+    this.voice = new VoiceAnalyser({ sampleRate: context.sampleRate });
+    this.status = { ...this.status, voiceReady: true };
+    this.onVoiceReady?.();
+  }
+
+  /** Loads the worklet once; later source swaps reuse the same node. */
+  private async ensureAnalysisNode(context: AudioContext): Promise<void> {
+    if (this.stageNode) return;
+    await context.audioWorklet.addModule(processorUrl);
+    this.stageNode = new AudioWorkletNode(context, 'stage-analysis', {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+    });
+    this.stageNode.port.onmessage = (event: MessageEvent<AnalysisMessage>): void => {
+      const { features, bpm, period, anchor, confidence, stability } = event.data;
+      this.stageFeatures = features;
+      this.stageBeat = { bpm, period, anchor, confidence, stability };
+    };
+  }
+
+  private connectStage(attached: AttachedAudioSource): void {
+    this.stageAttachment = attached;
+    if (this.stageNode) attached.node.connect(this.stageNode);
+  }
+
+  /**
+   * Swaps the stage source without tearing down the context or the game.
+   *
+   * The registry picks a source automatically, but its first choice is not
+   * always the one the player wants — and declining a share prompt used to
+   * leave no way back except a reload.
+   */
+  async useStageSource(provider: AudioSourceProvider): Promise<AudioSourceProvider> {
+    const context = this.context;
+    if (!context) throw new Error('Audio has not been started yet.');
+
+    const attached = await provider.attach(context);
+    // Only detach the old source once the new one is live, so a failed switch
+    // leaves the player with the source they already had.
+    this.stageAttachment?.detach();
+    await this.ensureAnalysisNode(context);
+    this.connectStage(attached);
+    this.status = { ...this.status, stageSourceLabel: attached.descriptor.label };
+    return provider;
   }
 
   /**
@@ -212,14 +273,16 @@ export class AudioEngine {
    * first shout of a run is judged against the real background rather than
    * against the analyser's cold-start guess.
    */
-  async calibrate(seconds = 2): Promise<number> {
+  async calibrate(seconds = 2, onFrame?: (frame: VoiceFrame) => void): Promise<number> {
     if (!this.voiceAnalyserNode || !this.voice) return -60;
 
     const samples: number[] = [];
     const deadline = performance.now() + seconds * 1000;
     while (performance.now() < deadline) {
       this.voiceAnalyserNode.getFloatTimeDomainData(this.waveform);
-      const { db } = this.voice.analyse(this.waveform, this.time);
+      const frame = this.voice.analyse(this.waveform, this.time);
+      const { db } = frame;
+      onFrame?.(frame);
       // A just-opened stream hands back zeroed buffers for a moment. Those are
       // not a quiet room, and including them drags the median to an impossible
       // floor that the whole run is then judged against.

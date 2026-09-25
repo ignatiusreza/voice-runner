@@ -8,15 +8,7 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 **iOS audio session category.** Must allow recording while other audio plays, or opening the mic ducks the player's music — precisely what the game needs to hear. `AVAudioSession` with `.playAndRecord` and `.mixWithOthers`.
 
-**Audio source picker.** The registry already probes and falls back; the player currently has no way to override it or to retry after declining a prompt. Needs the UI plus a `file` source entry for picking a local track.
-
-**Handle an unanswered permission prompt.** If the player neither allows nor blocks the microphone, `getUserMedia` stays pending and the start button sits on "Starting…" forever. `?demo` sidesteps it, but the real path needs a timeout that falls through to keyboard controls with an explanation.
-
-**Calibration UX.** Two seconds of room measurement happens silently behind the start button. It should be a visible "say something" step with live feedback, so the player learns what the meter means before it matters.
-
 ## Soon
-
-**Persistent scores.** Local best per day-seed, then a shared board keyed on the seed so a given day's stage is comparable.
 
 **More onset-driven reaction.** Onsets now swell the sun, wash the horizon and thicken the ground edge on the frame they land — the only channel that can be exactly in time, since terrain is generated seconds ahead and the smoothed features are late by construction. Screen shake, particle bursts and an obstacle that flashes as it passes are the obvious next additions.
 
@@ -28,17 +20,13 @@ What exists today is a complete vertical slice: audio in, stage out, voice contr
 
 ## Later
 
-**Difficulty ramp.** Density scales with loudness but not with elapsed distance, so a long quiet track never gets harder.
-
 **Character and world art.** The vector style is structural — flat fills, one stroke weight, a palette derived from spectral brightness — but the character is a rounded rectangle. The palette system is the part worth keeping.
 
-**Accessibility.** Voice control excludes some players by construction, which is why keyboard and touch are first-class rather than a debug affordance. Beyond that: a visual-only mode, adjustable trigger thresholds, and reduced-motion handling for the parallax.
+**Accessibility, continued.** Keyboard and touch are first-class, the voice trigger is adjustable, reduced motion suppresses the flash and damps the parallax, and an optional marker warns when an obstacle is one jump away. Still missing: a screen-reader description of the run, remappable keys, and a colour-blind check on the obstacle/terrain contrast, which is currently guaranteed only by hue opposition.
 
 **Strip source maps from native builds.** `cap sync` copies `dist/` wholesale into the APK, so the 2.2MB of `.map` files Vite emits ship inside it — about half the 4.8MB debug APK, and they publish the original source. Fine for a debug build, not for a store release: either drop `build.sourcemap` for native builds or delete the maps between `vite build` and `cap copy`.
 
 **Tempo tracking is still the weakest link.** The tracker carries multiple tempo hypotheses now, which stopped it flip-flopping between a tempo and its double — mean BPM over a fixed clip went from 8.3% apart between identical runs to 3.8%. It is not solved: on sparse material confidence sits near 0.10 and two readings stay contested for long stretches. Scoring hypotheses against predicted onset _positions_ rather than only autocorrelation peaks is the next step, since a hypothesis that predicts where the next beat lands is testable in a way a correlation peak is not.
-
-**Onset peak-picking.** The flash fires on onset strength crossing a scaled threshold, which trades sensitivity against selectivity badly: measured on real music, a high threshold flashed 4 times in 30s but landed on the beat (concentration 0.70), a low one flashed 44 times and landed anywhere (0.02). Requiring a local maximum — the standard peak-picking rule — decides those independently instead of forcing one constant to do both jobs.
 
 **Beat detection on difficult material.** Generation now locks tightly to the beat _when the beat is known_ — 0.88 against a known tempo. On real music the tracker is the weak link: confidence averages around 0.40 and the tempo estimate still reports octave errors on sparse or rubato passages, which caps end-to-end sync near 0.71. Better onset detection and a proper tempo-hypothesis tracker are the next lever, not more generator tuning.
 

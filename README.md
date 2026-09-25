@@ -34,7 +34,9 @@ Open http://localhost:5173. The microphone needs a secure context, so use `local
 
 On desktop, pick **Tab or system audio** when prompted and tick "share tab audio" to feed the game the actual music. On mobile, play the music out loud and let the microphone hear the room.
 
-No microphone? The game still runs — Space jumps, Down slides.
+No microphone? The game still runs — Space jumps, Down slides. If you never answer the permission prompt it starts without it after a few seconds, and wires the microphone in later if you do allow it.
+
+The start panel also carries an **Audio source** picker — switch between tab audio, the room, a local file or the demo track at any time, including after declining a prompt — and **Settings** for voice sensitivity, reduced motion, and an optional marker showing when an obstacle is one jump away.
 
 To see it working with no permissions at all, open `http://localhost:5173/?demo` (or `?demo=140` for a tempo). That drives the stage from a generated click track and skips the microphone entirely — useful for a quick look, and for tuning the generator against a known tempo.
 

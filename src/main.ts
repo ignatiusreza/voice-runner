@@ -3,9 +3,12 @@ import type { AudioFeatures } from './audio/analysis/features';
 import type { VoiceFrame } from './audio/analysis/voice';
 import type { AudioEngineOptions } from './audio/engine';
 import { AudioEngine } from './audio/engine';
-import { createFileSource } from './audio/sources/file';
-import { createSyntheticSource } from './audio/sources/synthetic';
 import { loadTrack, recordStream, saveTrack } from './audio/recorder';
+import { createFileSource } from './audio/sources/file';
+import { microphoneSource } from './audio/sources/microphone';
+import { describeStageSources } from './audio/sources/registry';
+import { createSyntheticSource } from './audio/sources/synthetic';
+import type { AudioSourceProvider } from './audio/sources/types';
 import { GameLoop } from './core/loop';
 import { seedFromString } from './core/rng';
 import { Game } from './game/game';
@@ -14,56 +17,64 @@ import { KeyboardInput } from './input/keyboard';
 import { VoiceController } from './input/voice-controller';
 import { Hud } from './render/hud';
 import { Renderer } from './render/renderer';
+import type { SourceChoice } from './ui/overlay';
+import { Overlay } from './ui/overlay';
+import type { Settings } from './ui/settings';
+import {
+  bestScoreFor,
+  loadSettings,
+  prefersReducedMotion,
+  recordScore,
+  saveSettings,
+  SENSITIVITY_RANGE_DB,
+} from './ui/settings';
 
 const stage = requireElement('stage');
-const overlay = requireElement('overlay');
-const status = requireElement('status');
-const startButton = requireElement('start') as HTMLButtonElement;
+const hudRoot = requireElement('hud');
+const overlayRoot = requireElement('overlay');
 
 const audio = new AudioEngine();
 const renderer = new Renderer();
-const hud = new Hud(requireElement('hud'));
+const hud = new Hud(hudRoot);
 const keyboard = new KeyboardInput();
 const voiceController = new VoiceController();
 
-// A per-day seed keeps a given day's runs comparable between players while the
-// music still makes each run different.
-const game = new Game(seedFromString(new Date().toDateString()));
-
-/**
- * `?demo` (optionally `?demo=140`) runs against a generated click track with no
- * microphone. It makes the game playable and demonstrable on a machine with no
- * audio permissions, and gives the generator a known tempo to be tuned against.
- */
-const demoMode = readDemoMode();
-
-/** `?record=20` captures 20s of the shared source; `?replay` plays it back. */
 const params = new URLSearchParams(window.location.search);
+
+/** A per-day seed keeps a day's runs comparable while the music varies them. */
+const seedKey = new Date().toDateString();
+const game = new Game(seedFromString(seedKey));
+
+let settings = loadSettings();
+// Honour the system preference the first time, rather than making the player
+// find the toggle.
+if (!('reducedMotion' in (readStoredRaw() ?? {})) && prefersReducedMotion()) {
+  settings = { ...settings, reducedMotion: true };
+}
+applySettings(settings);
+
+const overlay = new Overlay(overlayRoot, settings, {
+  onStart: () => void begin(),
+  onRestart: restart,
+  onPickSource: (id) => void switchSource(id),
+  onPickFile: (file) => void switchToFile(file),
+  onSettingsChange: (next) => {
+    settings = next;
+    saveSettings(next);
+    applySettings(next);
+  },
+});
+
+const demoMode = readDemoMode();
 const recordSeconds = params.has('record')
   ? Number.parseFloat(params.get('record') ?? '') || 20
   : 0;
 const isReplay = params.has('replay');
 
-if (demoMode) {
-  startButton.textContent = 'Run the demo track';
-  status.textContent =
-    'Demo mode: a generated click track drives the stage and the microphone is not used. Space jumps, Down slides.';
-}
-
-function readDemoMode(): AudioEngineOptions | null {
-  const value = new URLSearchParams(window.location.search).get('demo');
-  if (value === null) return null;
-  const bpm = Number.parseFloat(value);
-  return {
-    stageProviders: [createSyntheticSource({ bpm: Number.isFinite(bpm) && bpm > 0 ? bpm : 120 })],
-    useMicrophone: false,
-  };
-}
-
-// Sampling drives the beat tracker, so it must happen exactly once per frame —
-// the HUD reads this rather than sampling again.
+let started = false;
 let lastVoiceFrame: VoiceFrame | null = null;
 let lastFeatures: AudioFeatures | null = null;
+let activeSourceId: string | null = null;
 
 const loop = new GameLoop({
   update(dt) {
@@ -84,20 +95,208 @@ const loop = new GameLoop({
   },
 });
 
-/**
- * Whether the one-time setup has run.
- *
- * The button does double duty — first start and restart — and those must not do
- * the same thing. Re-running setup on a restart opens a second `AudioContext`,
- * re-prompts for screen sharing, and appends a second canvas over the first.
- */
-let started = false;
+overlay.showTitle();
+const bestToday = bestScoreFor(seedKey);
+overlay.setStatus(
+  (bestToday > 0 ? `Best today: ${String(bestToday)}.\n` : '') +
+    'The microphone is used for controls only. Nothing is recorded, stored or uploaded.',
+);
+refreshSourceList();
 
-/**
- * Dev-only sampling of the live analysis, so the feature-to-stage mappings can
- * be checked against real audio instead of guessed. Read from the console as
- * `__voiceRunner.stats()`.
- */
+if (demoMode) {
+  overlay.setPrimaryLabel('Run the demo track', false);
+  overlay.setStatus(
+    'Demo mode: a generated click track drives the stage. Space jumps, Down slides.',
+  );
+}
+
+function applySettings(next: Settings): void {
+  // Positive sensitivity means "react to quieter sounds", so it lowers the
+  // trigger — the sign flip belongs here rather than in the player's head.
+  voiceController.setTrim(-next.voiceSensitivity * SENSITIVITY_RANGE_DB);
+  renderer.setReducedMotion(next.reducedMotion);
+  renderer.setVisualCues(next.visualCues);
+}
+
+function readStoredRaw(): Record<string, unknown> | null {
+  try {
+    const raw = localStorage.getItem('voice-runner/settings');
+    return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
+function readDemoMode(): AudioEngineOptions | null {
+  const value = params.get('demo');
+  if (value === null) return null;
+  const bpm = Number.parseFloat(value);
+  return {
+    stageProviders: [createSyntheticSource({ bpm: Number.isFinite(bpm) && bpm > 0 ? bpm : 120 })],
+    useMicrophone: false,
+  };
+}
+
+function pickableSources(): { id: string; provider: AudioSourceProvider; choice: SourceChoice }[] {
+  const described = describeStageSources().map(({ provider, available, reason }) => ({
+    id: provider.descriptor.kind,
+    provider,
+    choice: {
+      id: provider.descriptor.kind,
+      label: provider.descriptor.label,
+      ...(available ? {} : { unavailable: reason ?? 'Not available on this device.' }),
+    } satisfies SourceChoice,
+  }));
+
+  return [
+    ...described,
+    {
+      id: 'demo',
+      provider: createSyntheticSource({ bpm: 120, audible: true }),
+      choice: { id: 'demo', label: 'Demo click track' },
+    },
+  ];
+}
+
+function refreshSourceList(): void {
+  overlay.setSources(
+    pickableSources().map((entry) => entry.choice),
+    activeSourceId,
+  );
+}
+
+async function switchSource(id: string): Promise<void> {
+  const entry = pickableSources().find((candidate) => candidate.id === id);
+  if (!entry || !started) return;
+
+  overlay.setStatus(`Switching to ${entry.choice.label}…`);
+  try {
+    await audio.useStageSource(entry.provider);
+    activeSourceId = id;
+    hud.setSource(entry.choice.label);
+    overlay.setStatus(`Stage audio: ${entry.choice.label}`);
+  } catch (error) {
+    // A declined share prompt is an ordinary outcome; the previous source is
+    // still attached, so say so rather than leaving a dead end.
+    overlay.setStatus(
+      `Kept the current source — ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  refreshSourceList();
+}
+
+async function switchToFile(file: File): Promise<void> {
+  if (!started) return;
+  overlay.setStatus(`Loading ${file.name}…`);
+  try {
+    await audio.useStageSource(createFileSource(file, file.name));
+    activeSourceId = 'file';
+    hud.setSource(file.name);
+    overlay.setStatus(`Stage audio: ${file.name}`);
+  } catch (error) {
+    overlay.setStatus(
+      `Could not play that file — ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  refreshSourceList();
+}
+
+function restart(): void {
+  overlay.hide();
+  voiceController.reset();
+  game.start();
+  loop.start();
+}
+
+async function begin(): Promise<void> {
+  overlay.setPrimaryLabel('Starting…', true);
+
+  try {
+    let options: AudioEngineOptions = demoMode ?? {};
+    if (isReplay) {
+      const track = await loadTrack();
+      if (!track) throw new Error('No clip recorded yet — run with ?record=20 first.');
+      options = {
+        stageProviders: [createFileSource(track.blob, `Recorded clip (${String(track.seconds)}s)`)],
+        useMicrophone: false,
+      };
+    }
+
+    // If the microphone arrives after setup gave up waiting, wire it in then.
+    audio.onVoiceReady = (): void => {
+      overlay.setStatus('Microphone connected — voice control is on.');
+    };
+
+    const engineStatus = await audio.start(options);
+    hud.setSource(engineStatus.stageSourceLabel);
+    activeSourceId = engineStatus.sharedMicrophone ? microphoneSource.descriptor.kind : null;
+
+    if (engineStatus.voiceReady) {
+      overlay.showCalibrating();
+      const floor = await audio.calibrate(2.5, (frame) => {
+        overlay.setVoiceLevel(frame.excessDb);
+      });
+      overlay.setStatus(
+        `Background measured at ${floor.toFixed(0)} dB. Shout louder than that to jump.`,
+      );
+    } else {
+      overlay.setStatus(
+        `${engineStatus.notices[0] ?? 'No microphone.'}\nSpace jumps, Down slides.`,
+      );
+    }
+
+    if (recordSeconds > 0) {
+      const stream = audio.stageStream;
+      if (!stream) throw new Error('This stage source cannot be recorded (no media stream).');
+      overlay.setStatus(`Recording ${String(recordSeconds)}s of the shared audio…`);
+      const blob = await recordStream(stream, recordSeconds);
+      await saveTrack({ blob, seconds: recordSeconds, recordedAt: Date.now() });
+      overlay.setPrimaryLabel('Recorded', false);
+      overlay.setStatus(
+        `Recorded ${(blob.size / 1024).toFixed(0)} kB. Reload with ?replay to measure against it.`,
+      );
+      return;
+    }
+
+    await renderer.init(stage);
+    keyboard.attach(window);
+
+    started = true;
+    refreshSourceList();
+    restart();
+  } catch (error) {
+    overlay.setPrimaryLabel('Try again', false);
+    overlay.setStatus(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function showGameOver(): void {
+  loop.stop();
+  const { score, distance } = game.snapshot;
+  const best = recordScore(seedKey, score);
+  overlay.showGameOver(score, best, distance);
+  overlay.setStatus(`Stage audio: ${audio.currentStatus.stageSourceLabel}`);
+  refreshSourceList();
+}
+
+// The context is suspended when the app is backgrounded; resuming mid-run would
+// hand the simulation a huge time jump, so pause the run instead. The audio
+// analysis keeps going regardless — it lives on the audio thread.
+if (!params.has('measure')) {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) loop.stop();
+    else if (game.snapshot.phase === 'running') loop.start();
+  });
+}
+
+function requireElement(id: string): HTMLElement {
+  const element = document.getElementById(id);
+  if (!element) throw new Error(`Expected an element with id "${id}"`);
+  return element;
+}
+
+/* --- dev-only measurement probe ------------------------------------------ */
+
 interface ProbeStat {
   min: number;
   max: number;
@@ -106,21 +305,10 @@ interface ProbeStat {
 }
 
 const probe = new Map<string, ProbeStat>();
-
-/**
- * Circular statistics for beat sync.
- *
- * Each time the player crosses a beat boundary in the world, the tracker's
- * phase at that instant is recorded. Perfectly synced generation puts every
- * crossing at the same phase, so the resultant length R approaches 1; an
- * arbitrary phase offset scatters them uniformly and R approaches 0.
- */
 let syncCos = 0;
 let syncSin = 0;
 let syncCount = 0;
 let lastCrossedBeat: number | null = null;
-
-/** Same statistic for the onset flash: does it land on the beat, or anywhere? */
 let flashCos = 0;
 let flashSin = 0;
 let flashCount = 0;
@@ -133,7 +321,6 @@ function recordFlash(): void {
   totalFrames += 1;
   if (pulse > 0.5) loudFrames += 1;
 
-  // Rising edge only, so one hit counts once however long it takes to fade.
   if (pulse > 0.6 && flashArmed) {
     flashArmed = false;
     const phase = audio.phaseAt(audio.time) * Math.PI * 2;
@@ -149,8 +336,7 @@ function recordSync(): void {
   const snapshot = game.snapshot;
   const x = snapshot.player.x;
   const segment = snapshot.world.segments.find((s) => x >= s.x && x < s.x + s.width);
-  if (!segment) return;
-  if (lastCrossedBeat === segment.beatIndex) return;
+  if (!segment || lastCrossedBeat === segment.beatIndex) return;
   lastCrossedBeat = segment.beatIndex;
 
   const phase = audio.phaseAt(audio.time) * Math.PI * 2;
@@ -164,11 +350,12 @@ function recordProbe(): void {
   if (!f) return;
   const beat = audio.beat;
   const mood = game.snapshot.mood;
+  recordSync();
+  recordFlash();
+
   const samples: Record<string, number> = {
     energy: f.energy,
     bass: f.bass,
-    mid: f.mid,
-    treble: f.treble,
     brightness: f.brightness,
     flux: f.flux,
     beatConfidence: beat.confidence,
@@ -177,11 +364,7 @@ function recordProbe(): void {
     moodWeight: mood.weight,
     moodBrightness: mood.brightness,
     pulse: mood.pulse,
-    speed: game.snapshot.speed,
   };
-  recordSync();
-  recordFlash();
-
   for (const [key, value] of Object.entries(samples)) {
     const stat = probe.get(key) ?? { min: Infinity, max: -Infinity, sum: 0, n: 0 };
     stat.min = Math.min(stat.min, value);
@@ -208,10 +391,6 @@ if (import.meta.env.DEV) {
         loudFrames = 0;
         totalFrames = 0;
       },
-      /**
-       * Reads the analysis straight from the audio thread, bypassing the render
-       * loop entirely — so it still reports real numbers in a hidden tab.
-       */
       live: (): Record<string, number> => ({
         energy: +audio.stage.energy.toFixed(4),
         bass: +audio.stage.bass.toFixed(4),
@@ -222,18 +401,16 @@ if (import.meta.env.DEV) {
         confidence: +audio.beat.confidence.toFixed(3),
         stability: +audio.beat.stability.toFixed(3),
       }),
-      /** Do the onset flashes land on the beat, and how often do they fire? */
       flash: (): { hits: number; onBeat: number; visibleFraction: number } => ({
         hits: flashCount,
         onBeat: flashCount === 0 ? 0 : +(Math.hypot(flashCos, flashSin) / flashCount).toFixed(3),
         visibleFraction: totalFrames === 0 ? 0 : +(loudFrames / totalFrames).toFixed(3),
       }),
-      /** 1 = every beat boundary lands at the same phase, 0 = no relationship. */
       sync: (): { crossings: number; lock: number } => ({
         crossings: syncCount,
         lock: syncCount === 0 ? 0 : +(Math.hypot(syncCos, syncSin) / syncCount).toFixed(3),
       }),
-      stats: () =>
+      stats: (): Record<string, { min: number; mean: number; max: number }> =>
         Object.fromEntries(
           [...probe.entries()].map(([k, v]) => [
             k,
@@ -242,112 +419,4 @@ if (import.meta.env.DEV) {
         ),
     },
   });
-}
-
-startButton.addEventListener('click', () => {
-  if (started) restart();
-  else void begin();
-});
-
-function restart(): void {
-  overlay.hidden = true;
-  voiceController.reset();
-  game.start();
-  loop.start();
-}
-
-async function begin(): Promise<void> {
-  startButton.disabled = true;
-  startButton.textContent = 'Starting…';
-
-  try {
-    // Replay mode swaps the live capture for the recorded clip, so every run
-    // analyses byte-identical audio. Without that, a measurement compares two
-    // different pieces of music and says nothing about the code.
-    let options = demoMode ?? {};
-    if (isReplay) {
-      const track = await loadTrack();
-      if (!track) throw new Error('No clip recorded yet — run with ?record=20 first.');
-      options = {
-        stageProviders: [createFileSource(track.blob, `Recorded clip (${String(track.seconds)}s)`)],
-        useMicrophone: false,
-      };
-    }
-
-    const engineStatus = await audio.start(options);
-    hud.setSource(engineStatus.stageSourceLabel);
-
-    if (!engineStatus.voiceReady) {
-      status.textContent =
-        'No microphone, so voice control is off — use Space to jump and Down to slide.\n' +
-        engineStatus.notices.join('\n');
-    }
-
-    startButton.textContent = 'Listening to the room…';
-    const floor = await audio.calibrate(2);
-
-    if (engineStatus.sharedMicrophone) {
-      status.textContent =
-        `Using the room through the microphone (background ${floor.toFixed(0)} dB).\n` +
-        'Play your music out loud, then shout over it to jump.';
-    }
-
-    await renderer.init(stage);
-    keyboard.attach(window);
-
-    if (recordSeconds > 0) {
-      const stream = audio.stageStream;
-      if (!stream) throw new Error('This stage source cannot be recorded (no media stream).');
-      status.textContent = `Recording ${String(recordSeconds)}s of the shared audio…`;
-      const blob = await recordStream(stream, recordSeconds);
-      await saveTrack({ blob, seconds: recordSeconds, recordedAt: Date.now() });
-      status.textContent =
-        `Recorded ${(blob.size / 1024).toFixed(0)} kB. Reload with ?replay to measure ` +
-        'against it repeatedly.';
-      startButton.disabled = false;
-      startButton.textContent = 'Recorded';
-      return;
-    }
-
-    started = true;
-    // Leave the button in its restart state. It is behind the hidden overlay
-    // now, but a disabled button with stale text is what the player would meet
-    // if anything surfaced the overlay before the first game over.
-    startButton.disabled = false;
-    startButton.textContent = 'Run again';
-    restart();
-  } catch (error) {
-    startButton.disabled = false;
-    startButton.textContent = 'Try again';
-    status.textContent = error instanceof Error ? error.message : String(error);
-  }
-}
-
-function showGameOver(): void {
-  loop.stop();
-  const { score, distance } = game.snapshot;
-  overlay.hidden = false;
-  startButton.disabled = false;
-  startButton.textContent = 'Run again';
-  status.textContent = `${String(score)} points over ${distance.toFixed(0)} metres.`;
-}
-
-// The context is suspended when the app is backgrounded; resuming mid-run would
-// hand the simulation a huge time jump, so pause the run instead.
-//
-// `?measure` suppresses that. Analysis is driven by the render loop, so pausing
-// it makes each run sample a different subset of the audio — identical clips
-// measured beat lock at 0.14 and 0.42 purely because of when the tab lost
-// focus. Measurement needs the loop to keep running.
-if (!params.has('measure')) {
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) loop.stop();
-    else if (game.snapshot.phase === 'running') loop.start();
-  });
-}
-
-function requireElement(id: string): HTMLElement {
-  const element = document.getElementById(id);
-  if (!element) throw new Error(`Expected an element with id "${id}"`);
-  return element;
 }
