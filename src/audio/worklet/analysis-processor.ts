@@ -27,6 +27,7 @@ export interface AnalysisMessage {
   period: number;
   anchor: number;
   confidence: number;
+  stability: number;
 }
 
 class AnalysisProcessor extends AudioWorkletProcessor {
@@ -77,6 +78,7 @@ class AnalysisProcessor extends AudioWorkletProcessor {
       period: beat.period,
       anchor: beat.anchor,
       confidence: beat.confidence,
+      stability: beat.stability,
     };
     this.port.postMessage(message);
   }

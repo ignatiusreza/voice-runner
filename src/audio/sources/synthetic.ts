@@ -47,7 +47,11 @@ export function createSyntheticSource(options: SyntheticTrackOptions = {}): Audi
         context.sampleRate,
       );
       const samples = buffer.getChannelData(0);
-      const decay = PULSE_DECAY_SECONDS * context.sampleRate;
+      // `PULSE_DECAY_SECONDS` is the time to fall from 0.9 to 0.01, not the
+      // time constant. Using it directly made the click fade 4.5x slower — at
+      // 200 BPM it was still at 8% of peak when the next one started, so the
+      // tracker was being tuned against a different signal than before.
+      const decay = (PULSE_DECAY_SECONDS / Math.log(90)) * context.sampleRate;
 
       for (let i = 0; i < samples.length; i++) {
         const t = i / context.sampleRate;

@@ -145,6 +145,51 @@ describe('BeatTracker', () => {
     expect(noisy.current.confidence).toBeLessThan(clear);
   });
 
+  it('does not keep reporting the old tempo after silence', () => {
+    // Decay used to be skipped on the silent path, so accumulated support sat
+    // frozen and the previous tempo still won for several windows after new
+    // music started.
+    const tracker = new BeatTracker();
+    feedClickTrack(tracker, 100, 12);
+    expect(tracker.current.bpm).toBeGreaterThan(94);
+    expect(tracker.current.bpm).toBeLessThan(106);
+
+    let time = 12;
+    for (let i = 0; i < 12 * 120; i++) {
+      tracker.push({ ...SILENT_FEATURES, time, flux: 0 });
+      time += 1 / 120;
+    }
+
+    const period = 60 / 170;
+    for (let i = 0; i < 14 * 120; i++) {
+      const phase = (time % period) / period;
+      tracker.push({ ...SILENT_FEATURES, time, flux: phase < 0.15 ? 1 - phase / 0.15 : 0 });
+      time += 1 / 120;
+    }
+    expect(tracker.current.bpm).toBeGreaterThan(160);
+  });
+
+  it('reports stability only once one tempo has held for a while', () => {
+    const tracker = new BeatTracker();
+    expect(tracker.current.stability).toBe(0);
+
+    feedClickTrack(tracker, 120, 12);
+    expect(tracker.current.stability).toBeGreaterThan(0.5);
+  });
+
+  it('stays unstable on noise, however periodic it briefly looks', () => {
+    // This is the discriminator the phase lock depends on: noise can reach a
+    // correlation comparable to sparse music, but it cannot keep the *same*
+    // tempo winning window after window.
+    const tracker = new BeatTracker();
+    let state = 99;
+    for (let i = 0; i < 20 * 120; i++) {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      tracker.push({ ...SILENT_FEATURES, time: i / 120, flux: state / 0x7fffffff });
+    }
+    expect(tracker.current.stability).toBeLessThan(0.5);
+  });
+
   it('returns to the fallback tempo after a reset', () => {
     const tracker = new BeatTracker();
     feedClickTrack(tracker, 120, 8);

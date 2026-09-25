@@ -12,7 +12,7 @@ import { groundHeightAt } from './world';
 const STEP = 1 / 60;
 
 function beatAt(bpm: number, confidence = 0.9): BeatEstimate {
-  return { bpm, period: 60 / bpm, anchor: 0, confidence };
+  return { bpm, period: 60 / bpm, anchor: 0, confidence, stability: 1 };
 }
 
 function features(overrides: Partial<AudioFeatures> = {}): AudioFeatures {
@@ -227,7 +227,14 @@ describe('StageDirector', () => {
       const director = new StageDirector(new Rng(5));
       const slice: WorldSlice = { segments: [], obstacles: [] };
       const now = 3;
-      director.update(slice, 0, now, LOUD(), { bpm: 120, period, anchor, confidence: 0.9 }, STEP);
+      director.update(
+        slice,
+        0,
+        now,
+        LOUD(),
+        { bpm: 120, period, anchor, confidence: 0.9, stability: 1 },
+        STEP,
+      );
 
       // A segment starting at x is reached at now + (x - playerX)/speed, and
       // that arrival time has to sit on the tracker's grid.

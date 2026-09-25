@@ -220,6 +220,7 @@ if (import.meta.env.DEV) {
         time: +audio.stage.time.toFixed(2),
         bpm: +audio.beat.bpm.toFixed(2),
         confidence: +audio.beat.confidence.toFixed(3),
+        stability: +audio.beat.stability.toFixed(3),
       }),
       /** Do the onset flashes land on the beat, and how often do they fire? */
       flash: (): { hits: number; onBeat: number; visibleFraction: number } => ({

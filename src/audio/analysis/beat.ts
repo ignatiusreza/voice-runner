@@ -23,6 +23,15 @@ export interface BeatEstimate {
   anchor: number;
   /** 0..1. Below ~0.3 the estimate is a guess and callers should ease off. */
   confidence: number;
+  /**
+   * 0..1 — how long the winning tempo has held, not how periodic the signal is.
+   *
+   * Confidence alone cannot separate music from noise: random input reaches a
+   * normalised correlation around 0.1 across the lag range, which is where
+   * sparse real music sits too. What noise cannot do is keep *the same* tempo
+   * winning window after window.
+   */
+  stability: number;
 }
 
 /**
@@ -43,6 +52,8 @@ interface TempoHypothesis {
 export class BeatTracker {
   private readonly envelope = new Float32Array(ENVELOPE_SIZE);
   private hypotheses: TempoHypothesis[] = [];
+  private winnerStreak = 0;
+  private lastWinnerLag = 0;
   /** Index just past the newest sample; the buffer is a ring. */
   private writeIndex = 0;
   private startTime: number | null = null;
@@ -52,6 +63,7 @@ export class BeatTracker {
     period: 60 / FALLBACK_BPM,
     anchor: 0,
     confidence: 0,
+    stability: 0,
   };
 
   push(features: AudioFeatures): void {
@@ -103,6 +115,11 @@ export class BeatTracker {
   }
 
   private reestimate(now: number): void {
+    // Decay first, so it still runs on the silent paths below. Leaving the
+    // scores frozen through a quiet passage meant the old tempo was still
+    // being reported for several windows after new music started.
+    for (const hypothesis of this.hypotheses) hypothesis.score *= HYPOTHESIS_DECAY;
+
     const ordered = this.orderedEnvelope();
     const mean = average(ordered);
     if (mean <= 1e-6) return;
@@ -131,8 +148,8 @@ export class BeatTracker {
     const winner = this.hypotheses[0];
     if (!winner) return;
 
-    const lag = Math.round(winner.lag);
     const period = winner.lag / ENVELOPE_HZ;
+    const lag = Math.round(winner.lag);
 
     // Confidence measures one thing: how periodic the signal is at the winning
     // tempo. Folding in the margin over the runner-up conflated "is there a
@@ -143,16 +160,34 @@ export class BeatTracker {
 
     // Find where the beats sit inside the window: the offset whose comb of
     // samples one period apart collects the most onset energy.
+    //
+    // The comb steps by the *fractional* period. Stepping by the rounded lag
+    // drifts against the period actually reported — at lag 50.5 that is half a
+    // sample per beat, some 60ms by the end of a six second window, which
+    // blurs the offset and then anchors it with a spacing that never produced
+    // it.
     let bestOffset = 0;
     let bestOffsetScore = -Infinity;
     for (let offset = 0; offset < lag; offset++) {
       let score = 0;
-      for (let i = offset; i < ordered.length; i += lag) score += ordered[i]!;
+      for (let k = 0; ; k++) {
+        const index = Math.round(offset + k * winner.lag);
+        if (index >= ordered.length) break;
+        score += ordered[index]!;
+      }
       if (score > bestOffsetScore) {
         bestOffsetScore = score;
         bestOffset = offset;
       }
     }
+
+    // A winner that is the same tempo as last window extends the streak; one
+    // that jumps elsewhere restarts it.
+    const held =
+      this.lastWinnerLag > 0 &&
+      Math.abs(Math.log2(winner.lag / this.lastWinnerLag)) < MATCH_TOLERANCE_OCTAVES;
+    this.winnerStreak = held ? this.winnerStreak + 1 : 0;
+    this.lastWinnerLag = winner.lag;
 
     // `ordered` ends at the newest sample, i.e. at `now`.
     const windowStart = now - (ordered.length - 1) / ENVELOPE_HZ;
@@ -161,6 +196,7 @@ export class BeatTracker {
       period,
       anchor: windowStart + bestOffset / ENVELOPE_HZ,
       confidence,
+      stability: clamp(this.winnerStreak / STABLE_WINDOWS, 0, 1),
     };
   }
 
@@ -177,8 +213,7 @@ export class BeatTracker {
    * once it has been supported for long enough.
    */
   private updateHypotheses(weighted: Float32Array): void {
-    for (const hypothesis of this.hypotheses) hypothesis.score *= HYPOTHESIS_DECAY;
-
+    const candidates: { lag: number; strength: number }[] = [];
     for (let lag = MIN_LAG + 1; lag < MAX_LAG; lag++) {
       const here = weighted[lag]!;
       // Local maxima only: the peaks are the tempo candidates, and every lag
@@ -186,23 +221,65 @@ export class BeatTracker {
       if (here <= weighted[lag - 1]! || here < weighted[lag + 1]! || here < CANDIDATE_FLOOR) {
         continue;
       }
+      candidates.push({ lag: refinePeak(weighted, lag), strength: here });
+    }
 
-      const refined = refinePeak(weighted, lag);
-      const match = this.hypotheses.find(
-        (h) => Math.abs(Math.log2(refined / h.lag)) < MATCH_TOLERANCE_OCTAVES,
-      );
-      if (match) {
-        match.lag += (refined - match.lag) * LAG_TRACKING;
-        match.score += here;
-      } else {
-        this.hypotheses.push({ lag: refined, score: here });
+    // At most one candidate per hypothesis, the strongest. Adding every peak
+    // within tolerance let a ragged window — several small ripples around one
+    // tempo — contribute more support than a single clean peak.
+    const claimed = new Set<{ lag: number; strength: number }>();
+    for (const hypothesis of this.hypotheses) {
+      let best: { lag: number; strength: number } | null = null;
+      for (const candidate of candidates) {
+        if (claimed.has(candidate)) continue;
+        if (Math.abs(Math.log2(candidate.lag / hypothesis.lag)) >= MATCH_TOLERANCE_OCTAVES)
+          continue;
+        if (!best || candidate.strength > best.strength) best = candidate;
+      }
+      if (!best) continue;
+      claimed.add(best);
+      hypothesis.lag += (best.lag - hypothesis.lag) * LAG_TRACKING;
+      hypothesis.score += best.strength;
+    }
+
+    for (const candidate of candidates) {
+      if (!claimed.has(candidate)) {
+        this.hypotheses.push({ lag: candidate.lag, score: candidate.strength });
       }
     }
 
+    this.mergeHypotheses();
     this.hypotheses.sort((a, b) => b.score - a.score);
     if (this.hypotheses.length > MAX_HYPOTHESES) {
       this.hypotheses.length = MAX_HYPOTHESES;
     }
+  }
+
+  /**
+   * Folds together hypotheses that have drifted within tolerance of each other.
+   *
+   * `LAG_TRACKING` moves hypotheses toward their candidates, so two that began
+   * apart can converge on one tempo. Left as duplicates they split that tempo's
+   * support between them, and a weaker rival can outrank both.
+   */
+  private mergeHypotheses(): void {
+    const merged: TempoHypothesis[] = [];
+    for (const hypothesis of this.hypotheses) {
+      const twin = merged.find(
+        (m) => Math.abs(Math.log2(hypothesis.lag / m.lag)) < MATCH_TOLERANCE_OCTAVES,
+      );
+      if (!twin) {
+        merged.push(hypothesis);
+        continue;
+      }
+      // Keep the better-supported lag and pool the support.
+      const total = twin.score + hypothesis.score;
+      if (total > 0) {
+        twin.lag = (twin.lag * twin.score + hypothesis.lag * hypothesis.score) / total;
+      }
+      twin.score = total;
+    }
+    this.hypotheses = merged;
   }
 
   /** Copies the ring buffer out oldest-first. */
@@ -216,6 +293,8 @@ export class BeatTracker {
 
   reset(): void {
     this.hypotheses = [];
+    this.winnerStreak = 0;
+    this.lastWinnerLag = 0;
     this.envelope.fill(0);
     this.writeIndex = 0;
     this.startTime = null;
@@ -225,6 +304,7 @@ export class BeatTracker {
       period: 60 / FALLBACK_BPM,
       anchor: 0,
       confidence: 0,
+      stability: 0,
     };
   }
 }
@@ -239,6 +319,8 @@ const MATCH_TOLERANCE_OCTAVES = 0.08;
 const LAG_TRACKING = 0.3;
 /** More than this and rivals are being tracked that will never be reported. */
 const MAX_HYPOTHESES = 6;
+/** Windows the same tempo must lead before stability reads 1. ~3s at 2Hz. */
+const STABLE_WINDOWS = 6;
 
 /** Sub-sample peak position, so tempo is not quantised to integer lags. */
 function refinePeak(values: Float32Array, index: number): number {

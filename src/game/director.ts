@@ -17,13 +17,16 @@ import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 const PULSE_DECAY_HALF_LIFE = 0.09;
 
 /**
- * Below this the tracker's phase is too rough to steer generation by.
+ * How settled the tempo must be before its phase steers generation.
  *
- * Deliberately low. Locking to the best phase available beats free-running at
- * an arbitrary one even when the estimate is mediocre, and the correction is
- * rate-limited anyway, so a wrong guess costs a slow slew rather than a jump.
+ * Confidence cannot make this call: noise reaches a normalised correlation
+ * around 0.1 across the lag range, which is where sparse real music sits, so
+ * any threshold low enough to lock onto quiet music also locks onto hiss. What
+ * noise cannot do is keep the same tempo winning window after window, so the
+ * gate is the winner's streak instead — roughly a second and a half of
+ * agreement.
  */
-const PHASE_LOCK_MIN_CONFIDENCE = 0.05;
+const PHASE_LOCK_MIN_STABILITY = 0.5;
 /** Seconds of phase correction allowed per second, so the slew stays invisible. */
 const PHASE_SLEW_RATE = 0.2;
 
@@ -232,7 +235,7 @@ export class StageDirector {
       // Position has to come from the same grid, or the first segment starts
       // off-beat and every width after it is measured from the wrong place.
       this.nextSegmentX = playerX + this.runSpeed * (this.nextBeatTime - now);
-    } else if (beat.confidence > PHASE_LOCK_MIN_CONFIDENCE) {
+    } else if (beat.stability > PHASE_LOCK_MIN_STABILITY) {
       // Ease the cursor back onto the grid as the estimate improves, rather
       // than jumping: a sudden phase shift would stretch or squash one segment
       // visibly. Slewing spreads it over a second or so.
