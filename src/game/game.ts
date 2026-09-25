@@ -33,6 +33,7 @@ const SILENT_BEAT: BeatEstimate = {
   period: 60 / FALLBACK_BPM,
   anchor: 0,
   confidence: 0,
+  stability: 0,
 };
 
 /**

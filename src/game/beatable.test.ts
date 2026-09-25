@@ -11,7 +11,7 @@ import { TUNING } from './tuning';
 const STEP = 1 / 60;
 
 function beatAt(bpm: number): BeatEstimate {
-  return { bpm, period: 60 / bpm, anchor: 0, confidence: 0.9 };
+  return { bpm, period: 60 / bpm, anchor: 0, confidence: 0.9, stability: 1 };
 }
 
 function loudAudio(time: number): AudioFeatures {

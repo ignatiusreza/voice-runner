@@ -6,7 +6,7 @@ import { IDLE_ACTIONS } from '../input/actions';
 import { Game } from './game';
 
 const STEP = 1 / 60;
-const BEAT: BeatEstimate = { bpm: 120, period: 0.5, anchor: 0, confidence: 0.9 };
+const BEAT: BeatEstimate = { bpm: 120, period: 0.5, anchor: 0, confidence: 0.9, stability: 1 };
 
 function features(time: number): AudioFeatures {
   return { ...SILENT_FEATURES, time, energy: 0.25, bass: 0.25, brightness: 0.4, flux: 0.2 };

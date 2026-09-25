@@ -18,6 +18,7 @@ const SILENT_BEAT: BeatEstimate = {
   period: 60 / FALLBACK_BPM,
   anchor: 0,
   confidence: 0,
+  stability: 0,
 };
 /**
  * Gap between calibration samples. Background tabs clamp timers to about a
@@ -147,9 +148,9 @@ export class AudioEngine {
           numberOfOutputs: 0,
         });
         this.stageNode.port.onmessage = (event: MessageEvent<AnalysisMessage>): void => {
-          const { features, bpm, period, anchor, confidence } = event.data;
+          const { features, bpm, period, anchor, confidence, stability } = event.data;
           this.stageFeatures = features;
-          this.stageBeat = { bpm, period, anchor, confidence };
+          this.stageBeat = { bpm, period, anchor, confidence, stability };
         };
         attached.node.connect(this.stageNode);
       } catch (error) {

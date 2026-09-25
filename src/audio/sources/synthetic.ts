@@ -1,8 +1,9 @@
 import type { AttachedAudioSource, AudioSourceProvider } from './types';
 
-/** How far ahead pulses are scheduled. Long enough to survive a stalled tab. */
-const SCHEDULE_AHEAD_SECONDS = 30;
+/** Beats rendered into the loop. A whole bar keeps the seam on a beat. */
+const LOOP_BEATS = 8;
 const PULSE_DECAY_SECONDS = 0.12;
+const TONE_HZ = 90;
 
 export interface SyntheticTrackOptions {
   bpm?: number;
@@ -13,22 +14,24 @@ export interface SyntheticTrackOptions {
 }
 
 /**
- * A generated click track.
+ * A generated click track, rendered once and looped.
  *
- * Not a toy: it is the only source that produces a known tempo and a known
- * envelope, which makes it what the generator is tuned against and what a
- * browser smoke test can drive the whole pipeline with. It also means the game
- * is playable — and demonstrable — on a machine with no microphone and nothing
- * playing.
+ * Not a toy: it is the only source with a known tempo, which makes it what the
+ * generator is tuned against and what a browser smoke test can drive the whole
+ * pipeline with. It also means the game is playable on a machine with no
+ * microphone and nothing playing.
+ *
+ * It used to schedule a fixed run of envelope events and then simply stop —
+ * after thirty seconds the demo fell silent, and a measurement taken past that
+ * point was reading the tracker's opinion of silence. A looping buffer cannot
+ * run out.
  */
 export function createSyntheticSource(options: SyntheticTrackOptions = {}): AudioSourceProvider {
-  const { bpm = 120, toneHz = 90, audible = false } = options;
+  const { bpm = 120, toneHz = TONE_HZ, audible = false } = options;
+  const label = `Demo track (${String(bpm)} BPM)`;
 
   return {
-    descriptor: {
-      kind: 'file',
-      label: `Demo track (${String(bpm)} BPM)`,
-    },
+    descriptor: { kind: 'file', label },
 
     isSupported(): boolean {
       return true;
@@ -37,35 +40,45 @@ export function createSyntheticSource(options: SyntheticTrackOptions = {}): Audi
     async attach(context: AudioContext): Promise<AttachedAudioSource> {
       if (context.state === 'suspended') await context.resume();
 
-      const oscillator = context.createOscillator();
-      oscillator.type = 'sawtooth';
-      oscillator.frequency.value = toneHz;
-
-      const envelope = context.createGain();
-      envelope.gain.value = 0;
-      oscillator.connect(envelope);
-
-      // Scheduled on the audio clock rather than with timers, so the beat grid
-      // stays exact even when the main thread stutters.
       const period = 60 / bpm;
-      let time = context.currentTime + 0.05;
-      const until = context.currentTime + SCHEDULE_AHEAD_SECONDS;
-      while (time < until) {
-        envelope.gain.setValueAtTime(0.9, time);
-        envelope.gain.exponentialRampToValueAtTime(0.01, time + PULSE_DECAY_SECONDS);
-        time += period;
+      const buffer = context.createBuffer(
+        1,
+        Math.round(period * LOOP_BEATS * context.sampleRate),
+        context.sampleRate,
+      );
+      const samples = buffer.getChannelData(0);
+      // `PULSE_DECAY_SECONDS` is the time to fall from 0.9 to 0.01, not the
+      // time constant. Using it directly made the click fade 4.5x slower — at
+      // 200 BPM it was still at 8% of peak when the next one started, so the
+      // tracker was being tuned against a different signal than before.
+      const decay = (PULSE_DECAY_SECONDS / Math.log(90)) * context.sampleRate;
+
+      for (let i = 0; i < samples.length; i++) {
+        const t = i / context.sampleRate;
+        const sinceBeat = t % period;
+        // Exponentially decaying sawtooth: a sharp attack with harmonics
+        // across the band, which is what an onset detector needs to see.
+        const envelope = Math.exp((-sinceBeat * context.sampleRate) / decay);
+        const phase = (t * toneHz) % 1;
+        samples[i] = (2 * phase - 1) * envelope * 0.9;
       }
 
-      if (audible) envelope.connect(context.destination);
-      oscillator.start();
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.loop = true;
+
+      const gain = context.createGain();
+      source.connect(gain);
+      if (audible) gain.connect(context.destination);
+      source.start();
 
       return {
-        descriptor: { kind: 'file', label: `Demo track (${String(bpm)} BPM)` },
-        node: envelope,
+        descriptor: { kind: 'file', label },
+        node: gain,
         detach() {
-          oscillator.stop();
-          oscillator.disconnect();
-          envelope.disconnect();
+          source.stop();
+          source.disconnect();
+          gain.disconnect();
         },
       };
     },
