@@ -4,7 +4,7 @@ import type { AudioFeatures } from './analysis/features';
 import { SILENT_FEATURES } from './analysis/features';
 import type { VoiceFrame } from './analysis/voice';
 import { SILENCE_DB, VoiceAnalyser } from './analysis/voice';
-import { openMicrophone } from './sources/microphone';
+import { microphoneSource, openMicrophone } from './sources/microphone';
 import { attachBestStageSource } from './sources/registry';
 import type { AttachedAudioSource, AudioSourceProvider } from './sources/types';
 import type { AnalysisMessage } from './worklet/analysis-processor';
@@ -72,6 +72,21 @@ export class AudioEngine {
   private stageNode: AudioWorkletNode | null = null;
   private voiceAnalyserNode: AnalyserNode | null = null;
   private voiceStream: MediaStream | null = null;
+  private voiceSourceNode: MediaStreamAudioSourceNode | null = null;
+  /**
+   * Bumped whenever the microphone is released, so a `getUserMedia` call that
+   * was already in flight is stopped on arrival rather than quietly re-opening
+   * the mic the player just walked away from.
+   */
+  private micGeneration = 0;
+  /** Set while the microphone is released because the page went away. */
+  private micReleased = false;
+  /** Set when `releaseMicrophone` suspended the context, so only it resumes it. */
+  private contextSuspended = false;
+  /** Voice control was asked for and not refused, so a release should restore it. */
+  private wantsVoice = false;
+  /** The stage was on the room mic when it was released, so restore it too. */
+  private restoreStageMic = false;
 
   private readonly waveform = new Float32Array(FFT_SIZE);
 
@@ -132,12 +147,12 @@ export class AudioEngine {
     if (!useMicrophone) {
       notices.push('Microphone skipped — keyboard controls only.');
     } else {
+      const generation = this.micGeneration;
+      this.wantsVoice = true;
       const pending = openMicrophone(context).then(
-        (stream) => {
-          this.adoptMicrophone(context, stream);
-          return true;
-        },
+        (stream) => this.adoptMicrophone(context, stream, generation),
         (error: unknown) => {
+          this.wantsVoice = false;
           this.micNotice = `Microphone unavailable: ${
             error instanceof Error ? error.message : String(error)
           }`;
@@ -177,16 +192,109 @@ export class AudioEngine {
     return this.status;
   }
 
-  private adoptMicrophone(context: AudioContext, stream: MediaStream): void {
+  /** Returns false, having stopped the stream, if it arrived after a release. */
+  private adoptMicrophone(context: AudioContext, stream: MediaStream, generation: number): boolean {
+    if (generation !== this.micGeneration || this.context !== context) {
+      stopTracks(stream);
+      return false;
+    }
     this.voiceStream = stream;
-    const micNode = context.createMediaStreamSource(stream);
-    this.voiceAnalyserNode = context.createAnalyser();
-    this.voiceAnalyserNode.fftSize = FFT_SIZE;
-    this.voiceAnalyserNode.smoothingTimeConstant = 0;
-    micNode.connect(this.voiceAnalyserNode);
-    this.voice = new VoiceAnalyser({ sampleRate: context.sampleRate });
+    this.voiceSourceNode = context.createMediaStreamSource(stream);
+    if (!this.voiceAnalyserNode) {
+      this.voiceAnalyserNode = context.createAnalyser();
+      this.voiceAnalyserNode.fftSize = FFT_SIZE;
+      this.voiceAnalyserNode.smoothingTimeConstant = 0;
+    }
+    this.voiceSourceNode.connect(this.voiceAnalyserNode);
+    // Keep the analyser across a release so the calibrated floor survives the
+    // player switching apps and back.
+    this.voice ??= new VoiceAnalyser({ sampleRate: context.sampleRate });
+    const wasReady = this.status.voiceReady;
     this.status = { ...this.status, voiceReady: true };
-    this.onVoiceReady?.();
+    if (!wasReady) this.onVoiceReady?.();
+    return true;
+  }
+
+  /**
+   * Stops every microphone track the engine holds.
+   *
+   * On Android, Chrome treats an open microphone as a call: it takes audio
+   * focus, which pauses whatever the player was listening to, and moves a
+   * Bluetooth headset from its media profile to the call profile. Both last
+   * for as long as a track is live, and a page that is hidden, backgrounded or
+   * closed without stopping its tracks can leave the headset stuck there. So
+   * the microphone is only held while the game is actually on screen.
+   *
+   * Stopping the tracks is not always enough: the context's output stream can
+   * be reopened as a voice-call stream while the mic is live, and it keeps
+   * the headset on the call route after the tracks are gone. So the context
+   * is suspended too, which stops its output stream. The exception is tab
+   * capture, which is expected to keep feeding the stage while the player
+   * looks at the tab they shared.
+   */
+  releaseMicrophone(): void {
+    this.micGeneration += 1;
+    // Counts a request still in flight: its stream is stopped on arrival, so
+    // it has to be re-requested on the way back.
+    const hadVoice = this.wantsVoice;
+    this.voiceSourceNode?.disconnect();
+    this.voiceSourceNode = null;
+    if (this.voiceStream) stopTracks(this.voiceStream);
+    this.voiceStream = null;
+
+    const stageOnMic = this.stageAttachment?.descriptor.kind === 'ambient-microphone';
+    if (stageOnMic) {
+      this.stageAttachment?.detach();
+      this.stageAttachment = null;
+    }
+
+    if (hadVoice || stageOnMic) {
+      this.micReleased = true;
+      this.restoreStageMic ||= stageOnMic;
+    }
+
+    const context = this.context;
+    if (
+      context?.state === 'running' &&
+      this.stageAttachment?.descriptor.kind !== 'display-capture'
+    ) {
+      this.contextSuspended = true;
+      void context.suspend();
+    }
+  }
+
+  /** Re-opens whatever `releaseMicrophone` closed. Safe to call when nothing was. */
+  async reacquireMicrophone(): Promise<void> {
+    const context = this.context;
+    if (!context) return;
+    if (this.contextSuspended) {
+      this.contextSuspended = false;
+      await context.resume();
+    }
+    if (!this.micReleased) return;
+    this.micReleased = false;
+    const generation = this.micGeneration;
+
+    try {
+      if (this.wantsVoice) {
+        const stream = await openMicrophone(context);
+        if (!this.adoptMicrophone(context, stream, generation)) return;
+      }
+      if (this.restoreStageMic) {
+        const attached = await microphoneSource.attach(context);
+        // The player may have picked another source while this was opening.
+        if (generation !== this.micGeneration || this.context !== context || this.stageAttachment) {
+          attached.detach();
+          return;
+        }
+        this.restoreStageMic = false;
+        this.connectStage(attached);
+      }
+    } catch (error) {
+      // Leave it to be retried on the next return to the page.
+      if (generation === this.micGeneration) this.micReleased = true;
+      throw error;
+    }
   }
 
   /** Loads the worklet once; later source swaps reuse the same node. */
@@ -226,6 +334,7 @@ export class AudioEngine {
     this.stageAttachment?.detach();
     await this.ensureAnalysisNode(context);
     this.connectStage(attached);
+    this.restoreStageMic = false;
     this.status = { ...this.status, stageSourceLabel: attached.descriptor.label };
     return provider;
   }
@@ -309,7 +418,14 @@ export class AudioEngine {
     this.stageAttachment = null;
     this.stageNode?.disconnect();
     this.stageNode = null;
-    for (const track of this.voiceStream?.getTracks() ?? []) track.stop();
+    this.micGeneration += 1;
+    this.micReleased = false;
+    this.contextSuspended = false;
+    this.wantsVoice = false;
+    this.restoreStageMic = false;
+    this.voiceSourceNode?.disconnect();
+    this.voiceSourceNode = null;
+    if (this.voiceStream) stopTracks(this.voiceStream);
     this.voiceStream = null;
     this.voice?.reset();
     this.stageFeatures = SILENT_FEATURES;
@@ -317,6 +433,10 @@ export class AudioEngine {
     await this.context?.close();
     this.context = null;
   }
+}
+
+function stopTracks(stream: MediaStream): void {
+  for (const track of stream.getTracks()) track.stop();
 }
 
 /**

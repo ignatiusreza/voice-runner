@@ -11,6 +11,14 @@
 
 The fallback chain in `src/audio/sources/registry.ts` handles all of this; see [ADR 0003](adr/0003-audio-capture-strategy.md). In practice mobile players use the ambient path: play the music out loud, shout over it.
 
+## Android Chrome: the microphone is a call
+
+Chrome on Android treats an open microphone as a voice call. While any mic track is live it takes audio focus, so a podcast or music app playing alongside is paused, and a Bluetooth headset is moved from its media profile (A2DP) to its call profile (HFP/SCO) — low-quality mono, with the mic in the headset rather than the phone. None of this is controllable from a web page; turning off `echoCancellation` does not avoid it.
+
+What the game can control is how long it holds the mic. `AudioEngine.releaseMicrophone()` stops every mic track when the page is hidden (`visibilitychange`) or closed (`pagehide`), and suspends the `AudioContext` as well — stopping the tracks alone was not enough on a real device, since the context's output stream can stay on the call route. On a real close the context is closed outright rather than left for the browser to discard, which on Android can happen long after the tab has disappeared (closed tabs are kept for "undo"). `reacquireMicrophone()` resumes the context and re-opens the mic on return, keeping the calibrated voice floor. A page that went away still holding a track could leave the headset stuck in the call profile even after the browser was closed; if that happens, turning Bluetooth off and on (or reconnecting the headset) restores media audio.
+
+The practical consequence for mobile web: the ambient path needs the music playing out loud through the phone speaker or another device. Music in Bluetooth headphones can't reach the mic anyway, and the other app is paused regardless. Playback capture in the native Android build is the only way around this.
+
 ## Secure context
 
 `getUserMedia` requires HTTPS or `localhost`. Opening the dev server on a LAN IP from a phone will fail with no microphone — `capabilities.ts` detects this and the start screen says so rather than reporting a generic error. For device testing, use a tunnel or `adb reverse tcp:5173 tcp:5173`.
