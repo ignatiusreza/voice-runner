@@ -21,6 +21,25 @@ export function availableStageSources(): AudioSourceProvider[] {
   return STAGE_SOURCE_ORDER.filter((provider) => provider.isSupported());
 }
 
+/**
+ * Every stage source, with a reason attached to the ones this platform cannot
+ * offer. The picker shows them all: "your phone cannot share another app's
+ * audio" is more useful to a player than the option silently not being there.
+ */
+export function describeStageSources(): {
+  provider: AudioSourceProvider;
+  available: boolean;
+  reason?: string;
+}[] {
+  return STAGE_SOURCE_ORDER.map((provider) => {
+    const available = provider.isSupported();
+    const reason = provider.descriptor.unavailableReason;
+    return available
+      ? { provider, available }
+      : { provider, available, ...(reason ? { reason } : {}) };
+  });
+}
+
 export interface StageSourceAttempt {
   attached: AttachedAudioSource | null;
   /** Every provider that was tried and why it did not work, newest last. */

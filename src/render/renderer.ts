@@ -1,6 +1,7 @@
 import { Application, Container, Graphics } from 'pixi.js';
 import { clamp, mapRange } from '../core/math';
 import type { GameSnapshot } from '../game/game';
+import { jumpAirtime, REFERENCE_JUMP_STRENGTH } from '../game/jump';
 import { TUNING } from '../game/tuning';
 import type { Palette } from './palette';
 import { paletteFor } from './palette';
@@ -32,6 +33,30 @@ export class Renderer {
 
   private pixelsPerMetre = 40;
   private groundY = 0;
+  private reducedMotion = false;
+  private visualCues = false;
+
+  /**
+   * Suppresses the onset flash and damps the parallax.
+   *
+   * The flash is the most motion-heavy thing on screen and fires several
+   * times a second on busy music, which is exactly what a reduced-motion
+   * preference is asking not to see.
+   */
+  setReducedMotion(enabled: boolean): void {
+    this.reducedMotion = enabled;
+  }
+
+  /**
+   * Draws a marker when an obstacle is one jump away.
+   *
+   * Voice control excludes some players outright, and playing muted removes the
+   * musical cue everyone else gets. This restores a timing cue that does not
+   * depend on hearing anything.
+   */
+  setVisualCues(enabled: boolean): void {
+    this.visualCues = enabled;
+  }
 
   async init(canvasParent: HTMLElement): Promise<void> {
     await this.app.init({
@@ -110,7 +135,7 @@ export class Renderer {
     // be in time with anything, and the smoothed features are by definition
     // late. A drum hit has to be visible on the frame it lands or the world
     // reads as merely audio-coloured rather than audio-driven.
-    const pulse = snapshot.mood.pulse;
+    const pulse = this.reducedMotion ? 0 : snapshot.mood.pulse;
     const radius = mapRange(snapshot.mood.intensity, 0, 1, 26, 58) * (1 + pulse * 0.45);
     g.circle(this.screenWidth * 0.78, this.groundY - this.screenHeight * 0.42, radius).fill({
       color: palette.groundEdge,
@@ -130,8 +155,12 @@ export class Renderer {
   }
 
   private drawParallax(palette: Palette, cameraX: number, snapshot: GameSnapshot): void {
-    this.drawHillBand(this.farLayer, palette.farHills, cameraX * 0.25, 2.6, 5.2, snapshot);
-    this.drawHillBand(this.nearLayer, palette.nearHills, cameraX * 0.55, 1.7, 3.4, snapshot);
+    // Reduced motion keeps the hills but stops them reacting to the music, so
+    // the horizon is scenery rather than another moving element.
+    const far = this.reducedMotion ? 3 : 5.2;
+    const near = this.reducedMotion ? 2 : 3.4;
+    this.drawHillBand(this.farLayer, palette.farHills, cameraX * 0.25, 2.6, far, snapshot);
+    this.drawHillBand(this.nearLayer, palette.nearHills, cameraX * 0.55, 1.7, near, snapshot);
   }
 
   /** A deterministic sawtooth ridge; `offset` scrolls it at the layer's rate. */
@@ -166,7 +195,7 @@ export class Renderer {
 
   private drawTerrain(palette: Palette, cameraX: number, snapshot: GameSnapshot): void {
     const g = this.terrain.clear();
-    const pulse = snapshot.mood.pulse;
+    const pulse = this.reducedMotion ? 0 : snapshot.mood.pulse;
     for (const segment of snapshot.world.segments) {
       if (!segment.solid) continue;
       const left = this.toScreenX(segment.x, cameraX);
@@ -198,6 +227,22 @@ export class Renderer {
       const bottom = this.toScreenY(ground + obstacle.bottom);
       const height = obstacle.height * this.pixelsPerMetre;
       const top = bottom - height;
+
+      // One-jump-away marker: a timing cue that does not depend on hearing the
+      // music, for playing muted or without voice control.
+      if (this.visualCues) {
+        const distance = obstacle.x - snapshot.player.x;
+        const runUp = snapshot.speed * (jumpAirtime(REFERENCE_JUMP_STRENGTH) / 2);
+        if (distance > 0 && distance < runUp) {
+          const fade = 1 - distance / runUp;
+          const markerY = this.toScreenY(ground + obstacle.bottom + obstacle.height) - 14;
+          g.moveTo(left + width / 2 - 7, markerY - 9)
+            .lineTo(left + width / 2 + 7, markerY - 9)
+            .lineTo(left + width / 2, markerY)
+            .closePath()
+            .fill({ color: palette.playerAccent, alpha: 0.35 + fade * 0.55 });
+        }
+      }
 
       if (obstacle.kind === 'hanging') {
         // Drawn as a downward wedge so its silhouette reads differently from a

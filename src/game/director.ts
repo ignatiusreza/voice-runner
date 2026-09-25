@@ -17,6 +17,12 @@ import type { Obstacle, ObstacleKind, WorldSlice } from './world';
 const PULSE_DECAY_HALF_LIFE = 0.09;
 
 /**
+ * Smallest peak worth flashing on. Lower than the old level threshold could be,
+ * because the local-maximum test now does the work of rejecting the wash.
+ */
+const ONSET_PEAK_FLOOR = 0.18;
+
+/**
  * How settled the tempo must be before its phase steers generation.
  *
  * Confidence cannot make this call: noise reaches a normalised correlation
@@ -66,6 +72,11 @@ const MIN_SEGMENT_WIDTH = 0.5;
 
 /** How far behind the camera terrain generation starts, in metres. */
 const START_MARGIN = 8;
+
+/** Distance over which the difficulty ramp reaches its full effect. */
+const RAMP_FULL_AT_METRES = 900;
+/** Most the ramp may multiply obstacle density by. */
+const RAMP_MAX_MULTIPLIER = 1.6;
 
 /**
  * How far the beat clock may fall behind before generation is treated as having
@@ -134,6 +145,9 @@ export class StageDirector {
   private smoothedBrightness = 0.35;
   private smoothedWeight = 0;
   private pulse = 0;
+  /** Two frames of onset history — a peak is only visible once it has passed. */
+  private previousOnset = 0;
+  private onsetBeforeLast = 0;
   private runSpeed: number = TUNING.baseRunSpeed;
 
   /** Audio time of the next beat to lay down. Never rewound by tempo changes. */
@@ -147,6 +161,8 @@ export class StageDirector {
   /** Right edge of the last hazard the player had to jump, in world metres. */
   private lastJumpHazardEndX = -Infinity;
   private lastSegmentHeight = 0;
+  /** Where the run began, so the ramp measures distance covered. */
+  private startX: number | null = null;
 
   constructor(private readonly rng: Rng) {}
 
@@ -197,11 +213,22 @@ export class StageDirector {
     this.smoothedBrightness = smoothTowards(this.smoothedBrightness, brightness, 0.9, dt);
     this.smoothedWeight = smoothTowards(this.smoothedWeight, weight, 0.35, dt);
 
-    // Attack instantly, fall away fast: a hit, not a wash. Smoothing the rise
-    // at all would put the flash late, which is worse than no flash.
+    // Peak-picking, not a level test. A single threshold had to set both
+    // sensitivity and selectivity and could not do both: measured on real
+    // music, a high one flashed 4 times in 30s but landed on the beat
+    // (concentration 0.70), a low one flashed 44 times and landed anywhere
+    // (0.02). Requiring a local maximum decides *whether* something is a hit;
+    // the threshold then only says how big a hit has to be.
     const onset = this.onsetScale.update(features.flux, dt);
-    this.pulse =
-      onset > this.pulse ? onset : smoothTowards(this.pulse, 0, PULSE_DECAY_HALF_LIFE, dt);
+    // Both comparisons are strict: a real hit rises *and* falls away. Allowing
+    // equality on the fall made a swell that plateaus — common once a sustained
+    // passage saturates the adaptive scale — register as a peak.
+    const isPeak = this.previousOnset > this.onsetBeforeLast && this.previousOnset > onset;
+    const hit = isPeak && this.previousOnset > ONSET_PEAK_FLOOR ? this.previousOnset : 0;
+    this.onsetBeforeLast = this.previousOnset;
+    this.previousOnset = onset;
+
+    this.pulse = hit > this.pulse ? hit : smoothTowards(this.pulse, 0, PULSE_DECAY_HALF_LIFE, dt);
     this.currentBpm = beat.bpm;
     this.currentConfidence = beat.confidence;
 
@@ -218,6 +245,8 @@ export class StageDirector {
     // That relationship is exact, where scroll speed could only ever be
     // approximate. See docs/adr/0004.
     this.runSpeed = TUNING.baseRunSpeed;
+
+    this.startX ??= playerX;
 
     if (this.nextBeatTime === null) {
       // Start the terrain behind the camera, not at the player's feet: the
@@ -373,7 +402,10 @@ export class StageDirector {
     // Hold the first bar clear so the player hears the tempo before reacting.
     if (beatIndex < 4) return null;
 
-    const density = mapRange(this.smoothedIntensity, 0, 1, 0.1, 0.78);
+    // Density follows the music, then a slow ramp with distance on top. A long
+    // quiet track used to stay equally easy however far the player got.
+    const ramp = mapRange(x - (this.startX ?? x), 0, RAMP_FULL_AT_METRES, 1, RAMP_MAX_MULTIPLIER);
+    const density = clamp(mapRange(this.smoothedIntensity, 0, 1, 0.1, 0.78) * ramp, 0, 0.85);
     if (!this.rng.chance(density)) return null;
 
     // Bright, airy music hangs things overhead; heavy music puts them on the
@@ -447,6 +479,9 @@ export class StageDirector {
     this.smoothedBrightness = 0.35;
     this.smoothedWeight = 0;
     this.pulse = 0;
+    this.previousOnset = 0;
+    this.onsetBeforeLast = 0;
+    this.startX = null;
     this.onsetScale.reset();
     this.intensityScale.reset();
     this.weightScale.reset();

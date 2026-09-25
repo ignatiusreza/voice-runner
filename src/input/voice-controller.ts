@@ -45,16 +45,30 @@ export class VoiceController {
   private readonly options: Required<VoiceControlOptions>;
   private engaged = false;
   private lastJumpTime = -Infinity;
+  /** dB added to the trigger, from the player's sensitivity setting. */
+  private trim = 0;
 
   constructor(options: VoiceControlOptions = {}) {
     this.options = { ...DEFAULTS, ...options };
   }
 
+  /**
+   * Shifts how loud a sound must be to register, in dB.
+   *
+   * A quiet room, a soft voice and a cheap microphone each move the same shout
+   * by several dB, so a fixed trigger makes the game unplayable for some people
+   * and trivial for others.
+   */
+  setTrim(db: number): void {
+    this.trim = db;
+  }
+
   update(frame: VoiceFrame | null): ActionState {
     if (!frame) return IDLE_ACTIONS;
 
-    const { triggerDb, ceilingDb, releaseDb, duckPitchHz, minClarity, retriggerSeconds } =
-      this.options;
+    const { ceilingDb, duckPitchHz, minClarity, retriggerSeconds } = this.options;
+    const triggerDb = this.options.triggerDb + this.trim;
+    const releaseDb = this.options.releaseDb + this.trim;
 
     const wasEngaged = this.engaged;
     this.engaged = wasEngaged ? frame.excessDb > releaseDb : frame.excessDb > triggerDb;
